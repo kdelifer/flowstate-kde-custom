@@ -10,6 +10,7 @@ flowstate-sim = { path = "../sim" }
 flowstate-wire = { path = "../wire" }
 flowstate-replay = { path = "../replay" }
 prost = "0.13"
+rusty_enet = "0.4"
 
 [dev-dependencies]
 

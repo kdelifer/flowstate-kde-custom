@@ -25,7 +25,9 @@
 #![deny(unsafe_code)]
 
 pub mod input_buffer;
+pub mod net;
 pub mod session;
+pub mod tick_loop;
 pub mod validation;
 
 use std::collections::HashMap;

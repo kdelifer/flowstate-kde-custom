@@ -17,6 +17,14 @@ lint:
 test:
 	cargo test --workspace --all-targets
 
+# T0.5: Simulation Core isolation (dependency allowlist + forbidden-API scan)
+isolation:
+	{{python}} scripts/check_sim_isolation.py
+
+# T0.19: schema identity (server and client share one resolved wire crate)
+schema-identity:
+	{{python}} scripts/check_wire_shared.py
+
 check-licenses:
 	@echo "NOTE: License scanning not yet automated (planned: cargo-deny)."
 	@echo "Manual review required. See: docs/licensing/third-party.md"
@@ -53,10 +61,10 @@ pr-trace-file file:
 	{{python}} scripts/pr_trace.py --file {{file}}
 
 # Full CI check (used on main branch and for local validation)
-ci: fmt lint test ids spec-lint
+ci: fmt lint test ids spec-lint isolation schema-identity
 
 # PR-specific CI check (uses changed-only spec lint)
-ci-pr: fmt lint test ids spec-lint-changed
+ci-pr: fmt lint test ids spec-lint-changed isolation schema-identity
 
 check: ci
 verify: ci

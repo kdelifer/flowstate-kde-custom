@@ -77,6 +77,12 @@ Changes accumulate in `[Unreleased]` until a version is tagged.
 - Movement observed over the real network round trip verified to match the Simulation Core's own formula (exact f64 equality, no epsilon)
 - Subprocess-based integration test connecting against the actual compiled `flowstate-server` binary (not just an in-process stand-in), proving the wire path survives a real process boundary
 
+**CI / Tooling:**
+- `scripts/check_sim_isolation.py`: T0.5 gate — `#![deny(unsafe_code)]`, dependency allowlist, forbidden-API source scan, and explicit-tick `advance()` signature check for `crates/sim`
+- `scripts/check_wire_shared.py`: T0.19 gate — confirms `flowstate-server` and `flowstate-client` resolve to the identical `flowstate-wire` package via `cargo metadata`
+- Replay verification integration test against an artifact from a real (not synthetic) match
+- `just ci`/`just ci-pr` now run both new gates alongside fmt/lint/test/ids/spec-lint
+
 ### Changed
 
 - (none yet)

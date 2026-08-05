@@ -18,8 +18,9 @@ The authoritative server foundation, real ENet transport, and a Rust test client
 - **Replay System** (`crates/replay`) — Full verification pipeline with initialization and outcome anchors
 - **Server Edge** (`crates/server`) — Real ENet transport (two-channel host, paced tick loop), input validation, buffer management, LastKnownIntent fallback, session lifecycle; runnable as `cargo run -p flowstate-server`
 - **Game Client Test Harness** (`crates/client`) — Minimal ENet client proving the wire path: connect/handshake, baseline + snapshot reception, TargetTickFloor tracking, scripted input, movement verified to match the Simulation Core's own formula over a real network round trip (including a subprocess test against the actual compiled server binary, not just in-process)
+- **CI Tier-0 gates** — Simulation Core isolation (dependency allowlist + forbidden-API scan) and schema identity (client/server share one resolved wire crate) enforced via `just ci`
 
-**Test Coverage:** 70 tests passing (sim: 16, wire: 8, replay: 8, server: 30, client: 8)
+**Test Coverage:** 71 tests passing (sim: 16, wire: 8, replay: 8, server: 31, client: 8)
 
 **What's Missing:** The real player-facing Game Client. `crates/client` is a headless test harness (no rendering, no real input) used to validate the protocol — per ADR-0005 the actual client is intended to be built in Godot, using `ENetMultiplayerPeer` against this same server. The top-level `client/` directory is currently a placeholder.
 

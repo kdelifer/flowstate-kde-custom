@@ -34,6 +34,7 @@ use std::time::Duration;
 use connection::{ClientHost, ConnectError};
 use flowstate_sim::Baseline;
 use flowstate_wire::{ServerWelcome, Tick};
+use input::{InputSeqGen, SendInputError};
 use state::BaselineError;
 use tick_floor::TickFloor;
 
@@ -41,15 +42,16 @@ use tick_floor::TickFloor;
 /// and tracks the locally observed match state (baseline, latest snapshot,
 /// target tick floor).
 ///
-/// `input` construction/send (CLI-005/006) and snapshot tracking (CLI-007)
-/// are not wired up yet; today this carries what CLI-002 (connect +
-/// handshake), CLI-003 (baseline reception), and CLI-004 (tick floor
-/// tracking) produce.
+/// Snapshot tracking (CLI-007) is not wired up yet; today this carries what
+/// CLI-002 (connect + handshake), CLI-003 (baseline reception), CLI-004
+/// (tick floor tracking), and CLI-005/006 (InputSeq generation + input
+/// send) produce.
 pub struct TestClient {
     host: ClientHost,
     welcome: ServerWelcome,
     tick_floor: TickFloor,
     baseline: Option<Baseline>,
+    input_seq: InputSeqGen,
 }
 
 impl TestClient {
@@ -57,10 +59,11 @@ impl TestClient {
     /// first half: send `ClientHello`, await `ServerWelcome`. (CLI-002)
     ///
     /// Also initializes [`TestClient::tick_floor`] from
-    /// `ServerWelcome.target_tick_floor` (CLI-004). `JoinBaseline`
-    /// reception (CLI-003) is a separate call -- see
-    /// [`TestClient::recv_baseline`] -- since the server sends it
-    /// immediately after `ServerWelcome` on the same Control channel.
+    /// `ServerWelcome.target_tick_floor` (CLI-004) and a fresh
+    /// [`InputSeqGen`] (CLI-005). `JoinBaseline` reception (CLI-003) is a
+    /// separate call -- see [`TestClient::recv_baseline`] -- since the
+    /// server sends it immediately after `ServerWelcome` on the same
+    /// Control channel.
     pub fn connect(addr: SocketAddr, timeout: Duration) -> Result<Self, ConnectError> {
         let (host, welcome) = connection::connect(addr, timeout)?;
         let tick_floor = TickFloor::from_welcome(welcome.target_tick_floor);
@@ -69,6 +72,7 @@ impl TestClient {
             welcome,
             tick_floor,
             baseline: None,
+            input_seq: InputSeqGen::new(),
         })
     }
 
@@ -106,5 +110,24 @@ impl TestClient {
     /// is wired up.
     pub fn observe_tick_floor(&mut self, received: Tick) {
         self.tick_floor.observe(received);
+    }
+
+    /// Build and send an `InputCmdProto` on the Realtime channel, targeting
+    /// `desired_tick` clamped up to the locally tracked
+    /// [`TestClient::tick_floor`] per ADR-0006, consuming the next
+    /// `InputSeq`. (CLI-005, CLI-006)
+    pub fn send_input(
+        &mut self,
+        desired_tick: Tick,
+        move_dir: [f64; 2],
+    ) -> Result<(), SendInputError> {
+        let seq = self.input_seq.advance();
+        input::send_input(
+            &mut self.host,
+            self.tick_floor.get(),
+            desired_tick,
+            seq,
+            move_dir,
+        )
     }
 }

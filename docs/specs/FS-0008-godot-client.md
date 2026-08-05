@@ -36,7 +36,7 @@ This spec defines the minimal Godot client needed to close that gap: connect to 
 | INV-0002 | Constrains | Client-side rendering/interpolation MUST NOT feed back into the fixed-timestep simulation |
 | INV-0003 | Constrains | Client input is intent only; the client MUST NOT author or assume authoritative state |
 | KC-0001 | Constrains | Client MUST NOT gain direct access to the Simulation Core; wire-protocol boundary only, same as the test harness |
-| ADR-0005 | Implements | v0 networking architecture: Godot client via `ENetMultiplayerPeer`, same channel/message semantics as `crates/client` |
+| ADR-0005 | Implements | v0 networking architecture: Godot client's ENet stack talks to the same 2-channel host as `crates/client` (see Interfaces — G0.1 found the API-level detail differs from ADR-0005's literal wording) |
 | ADR-0006 | Implements | Input tick targeting (TargetTickFloor, InputSeq) — client-side half of the contract already implemented server-side |
 
 ## Domain Concepts
@@ -57,9 +57,13 @@ No new domain concepts are introduced. This spec is a second implementation of e
 
 ## Interfaces
 
-### Transport (low risk — protocol already defined)
+### Transport — resolved by G0.1
 
-Godot's `ENetMultiplayerPeer` connects to `flowstate-server`'s existing two-channel ENet host (Realtime = channel 0, Control = channel 1) and follows the exact message flow already implemented server-side and proven by `crates/client`: `ClientHello` → `ServerWelcome` + `JoinBaseline` → per-tick `InputCmdProto` / `SnapshotProto`. No server-side or wire-schema changes are required for this piece.
+Godot connects to `flowstate-server`'s existing two-channel ENet host (Realtime = channel 0, Control = channel 1) and follows the exact message flow already implemented server-side and proven by `crates/client`: `ClientHello` → `ServerWelcome` + `JoinBaseline` → per-tick `InputCmdProto` / `SnapshotProto`. No server-side or wire-schema changes are required for this piece.
+
+**Correction from the original draft, found while implementing G0.1:** this MUST use Godot's low-level `ENetConnection`/`ENetPacketPeer` API, not the high-level `ENetMultiplayerPeer` that ADR-0005's wording literally suggests. `ENetMultiplayerPeer` layers Godot's own `SceneMultiplayer` RPC/replication protocol on top of raw ENet, which `flowstate-server` does not speak and was never designed to interoperate with — it would add a Godot-specific handshake and framing our server can't participate in. The low-level API talks raw ENet packets on explicit channels, which is exactly what `flowstate-server` expects. G0.1's spike (`client/tests/g0_1_enet_handshake.gd`) validates this: two `ENetConnection` clients complete the ENet handshake, exchange an empty `ClientHello`, and receive genuine `ServerWelcome`/`JoinBaseline` bytes back on the correct channel. ADR-0005 should be corrected to say "Godot's low-level ENet API (`ENetConnection`)," not `ENetMultiplayerPeer`, when this spec is approved.
+
+One non-obvious API detail worth recording since it cost real debugging time: `ENetConnection.service()` returns `[event_type, peer, <reserved, always 0 in practice>, channel_id]` — the channel is at **index 3**, not index 2 as a naive reading of "event, peer, channel, data" would suggest. Verified empirically against known `CHANNEL_CONTROL`/`CHANNEL_REALTIME` traffic; see the comment in `g0_1_enet_handshake.gd`.
 
 ### Protocol serialization — OPEN ARCHITECTURAL QUESTION
 
@@ -133,10 +137,11 @@ Explicitly out of scope for this spec (matching FS-0007's own Non-Goals plus cli
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|------------|--------|------------|
-| `rusty_enet` (server) and Godot's `ENetMultiplayerPeer` (C libenet) are not wire-compatible | Medium | High — would force revisiting the SRV-002 transport choice | Gate G0.1 is a standalone spike, done first, before any other client investment |
+| ~~`rusty_enet` (server) and Godot's ENet stack are not wire-compatible~~ — **RESOLVED by G0.1** | — | — | Confirmed compatible 2026-08-05: `client/tests/g0_1_enet_handshake.gd`, run against a live `flowstate-server`, completed the raw ENet handshake and received genuine `ServerWelcome`/`JoinBaseline` bytes over the correct channel, 3 of 4 runs clean (1 startup-timing flake, not a compatibility issue). Requires Godot's low-level `ENetConnection` API, not `ENetMultiplayerPeer` — see Interfaces correction above. |
 | Protocol serialization approach undecided | High (certain, until resolved) | Medium — blocks G0.2 onward | Explicit maintainer decision requested in Interfaces section before implementation proceeds past G0.1 |
 | No existing Godot test automation in this repo's CI | Medium | Low–Medium — Tier-0 gates above would be manually verified initially | Scoped to Tier 1 follow-up; does not block this spec's Tier 0 |
 | Dual toolchain (Rust + Godot) raises contributor onboarding cost | Low | Low | Document setup once implementation lands; not a design blocker |
+| `flowstate-server`'s tick loop propagates a single peer's abrupt disconnect (OS-level ICMP-triggered socket error) as a fatal error for the whole process, not a scoped per-peer disconnect | Confirmed (seen twice during G0.1 testing) | Medium — a Godot client crashing/force-quitting mid-match kills the match for every other connected player | Not fixed here (out of scope for G0.1); worth a follow-up issue against `crates/server/src/tick_loop.rs` before real multiplayer testing begins |
 
 ## Alternatives
 
@@ -161,3 +166,4 @@ Explicitly out of scope for this spec (matching FS-0007's own Non-Goals plus cli
 | Date | Owner | Change |
 |------|-------|--------|
 | 2026-08-05 | @kenneth | Initial draft |
+| 2026-08-05 | @kenneth | G0.1 implemented and passing; corrected Transport section (`ENetConnection`, not `ENetMultiplayerPeer`); resolved the top Risk entry; recorded the `service()` array index detail and a new server robustness finding |

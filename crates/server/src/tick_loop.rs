@@ -135,6 +135,11 @@ pub fn run(config: ServerConfig, addr: SocketAddr) -> io::Result<ReplayArtifact>
             CHANNEL_REALTIME,
             &enet::Packet::unreliable(snapshot_bytes.as_slice()),
         );
+        // `Host::broadcast` only queues; without an explicit flush, a
+        // broadcast queued on the match's final tick would never reach the
+        // socket if `should_end_match()` breaks the loop on the next
+        // iteration before another `service()` call happens.
+        host.flush();
 
         // Wall-clock pacing (LOOP-001).
         next_tick_at += tick_interval;

@@ -1,0 +1,18 @@
+[package]
+name = "flowstate-client"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Game Client (v0 test harness) for Flowstate multiplayer"
+
+[dependencies]
+flowstate-sim = { path = "../sim" }
+flowstate-wire = { path = "../wire" }
+prost = "0.13"
+rusty_enet = "0.4"
+
+[dev-dependencies]
+flowstate-server = { path = "../server" }
+
+[lints.rust]
+unsafe_code = "deny"

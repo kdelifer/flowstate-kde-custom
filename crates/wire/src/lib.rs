@@ -23,6 +23,8 @@
 
 use prost::Message;
 
+pub mod channels;
+
 // ============================================================================
 // Type Aliases (matching simulation crate)
 // ============================================================================
@@ -392,6 +394,19 @@ impl From<flowstate_sim::Snapshot> for SnapshotProto {
     }
 }
 
+impl TryFrom<SnapshotProto> for flowstate_sim::Snapshot {
+    type Error = &'static str;
+
+    fn try_from(s: SnapshotProto) -> Result<Self, Self::Error> {
+        let entities: Result<Vec<_>, _> = s.entities.into_iter().map(TryInto::try_into).collect();
+        Ok(Self {
+            tick: s.tick,
+            entities: entities?,
+            digest: s.digest,
+        })
+    }
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -494,6 +509,39 @@ mod tests {
         let encoded = msg.encode_to_vec();
         let decoded = ReplayArtifact::decode(encoded.as_slice()).unwrap();
         assert_eq!(msg, decoded);
+    }
+
+    #[test]
+    fn test_snapshot_proto_to_sim_conversion() {
+        let proto = SnapshotProto {
+            tick: 7,
+            entities: vec![EntitySnapshotProto {
+                entity_id: 1,
+                position: vec![1.5, -2.5],
+                velocity: vec![5.0, 0.0],
+            }],
+            digest: 0x1234,
+            target_tick_floor: 8, // not carried by flowstate_sim::Snapshot
+        };
+        let snapshot: flowstate_sim::Snapshot = proto.try_into().unwrap();
+        assert_eq!(snapshot.tick, 7);
+        assert_eq!(snapshot.digest, 0x1234);
+        assert_eq!(snapshot.entities[0].position, [1.5, -2.5]);
+    }
+
+    #[test]
+    fn test_snapshot_proto_to_sim_conversion_rejects_malformed_position() {
+        let proto = SnapshotProto {
+            tick: 7,
+            entities: vec![EntitySnapshotProto {
+                entity_id: 1,
+                position: vec![1.5], // missing y
+                velocity: vec![5.0, 0.0],
+            }],
+            digest: 0,
+            target_tick_floor: 0,
+        };
+        assert!(flowstate_sim::Snapshot::try_from(proto).is_err());
     }
 
     /// T0.19: Verify this crate exists and can be depended upon.

@@ -45,9 +45,37 @@ Changes accumulate in `[Unreleased]` until a version is tagged.
 - Spec template and structure (`docs/specs/`)
 
 **Code:**
-- Minimal simulation crate (`crates/sim`) with smoke test
 - Rust toolchain pinned to 1.92.0 with edition 2024
-- Workspace structure with placeholders for client and protocol crates
+- Top-level `client/` and `protocol/` directories reserved (currently placeholders) for the eventual Godot presentation client and engine-agnostic schemas, distinct from `crates/client` below
+
+**Simulation Core (`crates/sim`):**
+- Deterministic, fixed-timestep `World` with explicit-tick `advance()` (ADR-0003); no I/O, networking, wall-clock, or ambient RNG (INV-0004)
+- v0 WASD movement model (`MOVE_SPEED = 5.0` units/sec)
+- FNV-1a 64-bit `state_digest()` with f64 canonicalization (`-0.0` → `+0.0`, NaN → quiet NaN) per ADR-0007
+- PlayerId non-assumption: no reliance on contiguous/zero-based IDs (verified with non-contiguous test IDs)
+
+**Wire Protocol (`crates/wire`):**
+- Inline Protobuf (prost) message types shared by client and server: `ClientHello`, `ServerWelcome`, `JoinBaseline`, `InputCmdProto`, `SnapshotProto`, `ReplayArtifact`, and supporting types
+- Conversions between wire types and Simulation Core types (`Baseline`, `Snapshot`, `EntitySnapshot`)
+- Realtime (unreliable+sequenced) / Control (reliable+ordered) channel constants per ADR-0005
+
+**Replay System (`crates/replay`):**
+- `ReplayRecorder` for match-time `AppliedInput` and baseline capture
+- `ReplayVerifier` (`verify_replay`): build fingerprint check, AppliedInput stream integrity, initialization anchor (baseline digest), full tick replay, final digest match (INV-0006)
+- Build fingerprint acquisition (binary SHA-256, target triple, profile, git commit)
+- On-disk artifact read/write (`write_replay`/`read_replay`)
+
+**Server Edge (`crates/server`):**
+- Real ENet transport: two-channel host (Realtime/Control), wall-clock-paced tick loop, runnable as `cargo run -p flowstate-server`
+- Session management, PlayerId assignment (including `--test-mode`/`--test-player-ids` override for non-contiguous-ID testing)
+- Input validation: NaN/Inf drop, magnitude clamp, tick window, TargetTickFloor enforcement, rate limiting, InputSeq tie-breaking (DM-0026)
+- LastKnownIntent fallback for missing input (DM-0023)
+- Match lifecycle: connection timeout, disconnect handling, match completion, ReplayArtifact persistence
+
+**Game Client Test Harness (`crates/client`):**
+- Minimal ENet client (not the player-facing game client — see "What's Missing" in `README.md`) proving the wire path against a real server: connect/handshake, `JoinBaseline` reception, `TargetTickFloor` tracking (ADR-0006), `InputSeq` generation and `InputCmdProto` send, `SnapshotProto` polling, scripted WASD movement driver
+- Movement observed over the real network round trip verified to match the Simulation Core's own formula (exact f64 equality, no epsilon)
+- Subprocess-based integration test connecting against the actual compiled `flowstate-server` binary (not just an in-process stand-in), proving the wire path survives a real process boundary
 
 ### Changed
 
@@ -63,7 +91,8 @@ Changes accumulate in `[Unreleased]` until a version is tagged.
 
 ### Fixed
 
-- (none yet)
+- Server Edge: `Host::broadcast()` only queues a packet; without an explicit flush, the final tick's `SnapshotProto` of a match could be silently dropped if the tick loop ended before another `service()` call happened to flush it
+- Game Client Test Harness: the same class of bug on the send side — `Peer::send()` only queues; `TestClient::send_input` now flushes explicitly since nothing else services the connection between calls
 
 ### Security
 

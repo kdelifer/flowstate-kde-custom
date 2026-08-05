@@ -111,6 +111,7 @@ Every third-party dependency or asset must be recorded below.
 |----|----|----|----|----|----|
 | prost | 0.13 | Apache-2.0 | https://crates.io/crates/prost | Runtime dependency | Protobuf serialization for wire protocol |
 | sha2 | 0.10 | MIT OR Apache-2.0 | https://crates.io/crates/sha2 | Runtime dependency | SHA-256 for build fingerprint |
+| rusty_enet | 0.4 | MIT | https://crates.io/crates/rusty_enet | Runtime dependency | Pure-Rust ENet transport (transpiled from the original C libenet) for `crates/server` and `crates/client`; chosen per ADR-0005 to avoid a C toolchain requirement. Wire compatibility with Godot's `ENetMultiplayerPeer` (which wraps the original C libenet) has not yet been independently verified against a real Godot peer. |
 
 **Usage Scope examples**
 - Runtime dependency

@@ -1,0 +1,13 @@
+# Dependency allowlist for crates/sim (Simulation Core).
+#
+# Ref: INV-0004 (Simulation Core Isolation), T0.5.
+#
+# The Simulation Core must not perform I/O, networking, wall-clock reads,
+# or use ambient/unseeded randomness (KC-0001: a boundary violation here is
+# a project kill condition). Every crate listed in crates/sim/Cargo.toml's
+# [dependencies] table must appear here, one name per line.
+#
+# As of this writing, flowstate-sim depends on nothing but std -- this file
+# is intentionally empty of entries. Add a name here only after confirming
+# the crate is a pure, deterministic computation with no I/O/time/RNG
+# surface, and note the justification in the same PR.

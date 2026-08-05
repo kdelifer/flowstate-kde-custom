@@ -1,0 +1,38 @@
+# Forbidden source-text patterns for crates/sim (Simulation Core).
+#
+# Ref: INV-0004 (Simulation Core Isolation), T0.5, KC-0001.
+#
+# One literal substring per line. Blank lines and lines starting with '#'
+# are ignored. Matched as plain substrings (not regex) against every line
+# of every crates/sim/src/**/*.rs file -- this is a coarse text scan, not a
+# semantic one, so a false positive inside a comment or string is possible
+# and should be handled by rewording rather than suppressing the check.
+
+# File I/O
+std::fs::
+File::
+OpenOptions
+
+# Network I/O
+std::net::
+TcpStream
+UdpSocket
+
+# Wall-clock time
+std::time::Instant
+std::time::SystemTime
+Instant::now()
+SystemTime::now()
+
+# Thread sleep / scheduling
+std::thread::sleep
+thread::sleep
+
+# Environment access
+std::env::var
+env::vars
+
+# Unseeded / ambient randomness
+rand::thread_rng
+OsRng
+getrandom

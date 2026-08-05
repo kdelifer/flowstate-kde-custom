@@ -32,25 +32,25 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use connection::{ClientHost, ConnectError};
-use flowstate_sim::Baseline;
+use flowstate_sim::{Baseline, Snapshot};
 use flowstate_wire::{ServerWelcome, Tick};
 use input::{InputSeqGen, SendInputError};
-use state::BaselineError;
+use state::{BaselineError, SnapshotError};
 use tick_floor::TickFloor;
 
 /// A single test client instance: owns the ENet connection to a Server Edge
 /// and tracks the locally observed match state (baseline, latest snapshot,
 /// target tick floor).
 ///
-/// Snapshot tracking (CLI-007) is not wired up yet; today this carries what
-/// CLI-002 (connect + handshake), CLI-003 (baseline reception), CLI-004
-/// (tick floor tracking), and CLI-005/006 (InputSeq generation + input
-/// send) produce.
+/// Carries what CLI-002 (connect + handshake), CLI-003 (baseline
+/// reception), CLI-004 (tick floor tracking), CLI-005/006 (InputSeq
+/// generation + input send), and CLI-007 (snapshot reception) produce.
 pub struct TestClient {
     host: ClientHost,
     welcome: ServerWelcome,
     tick_floor: TickFloor,
     baseline: Option<Baseline>,
+    snapshot: Option<Snapshot>,
     input_seq: InputSeqGen,
 }
 
@@ -72,6 +72,7 @@ impl TestClient {
             welcome,
             tick_floor,
             baseline: None,
+            snapshot: None,
             input_seq: InputSeqGen::new(),
         })
     }
@@ -105,9 +106,8 @@ impl TestClient {
     }
 
     /// Fold a newly observed floor value into local tracking, taking
-    /// `max(current, received)` per ADR-0006. Called with
-    /// `SnapshotProto.target_tick_floor` once snapshot reception (CLI-007)
-    /// is wired up.
+    /// `max(current, received)` per ADR-0006. Called internally by
+    /// [`TestClient::poll_snapshot`] with each `SnapshotProto.target_tick_floor`.
     pub fn observe_tick_floor(&mut self, received: Tick) {
         self.tick_floor.observe(received);
     }
@@ -129,5 +129,28 @@ impl TestClient {
             seq,
             move_dir,
         )
+    }
+
+    /// Drain any `SnapshotProto` messages currently available on the
+    /// Realtime channel, keeping only the most recent (highest tick) per
+    /// ADR-0005's unreliable+sequenced semantics, updating locally tracked
+    /// state, and folding its `target_tick_floor` into
+    /// [`TestClient::tick_floor`] via [`TestClient::observe_tick_floor`].
+    /// Non-blocking: returns `Ok(None)` if nothing new has arrived.
+    /// (CLI-007)
+    pub fn poll_snapshot(&mut self) -> Result<Option<&Snapshot>, SnapshotError> {
+        match state::poll_snapshot(&mut self.host)? {
+            Some((snapshot, floor)) => {
+                self.observe_tick_floor(floor);
+                Ok(Some(self.snapshot.insert(snapshot)))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// The most recent `Snapshot` received via [`TestClient::poll_snapshot`],
+    /// if any.
+    pub fn snapshot(&self) -> Option<&Snapshot> {
+        self.snapshot.as_ref()
     }
 }

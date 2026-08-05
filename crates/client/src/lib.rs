@@ -32,30 +32,44 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use connection::{ClientHost, ConnectError};
-use flowstate_wire::ServerWelcome;
+use flowstate_sim::Baseline;
+use flowstate_wire::{ServerWelcome, Tick};
+use state::BaselineError;
+use tick_floor::TickFloor;
 
 /// A single test client instance: owns the ENet connection to a Server Edge
 /// and tracks the locally observed match state (baseline, latest snapshot,
 /// target tick floor).
 ///
-/// `state`, `tick_floor`, and `input` tracking are populated incrementally
-/// by CLI-003..CLI-007; today this only carries what CLI-002 (connect +
-/// handshake) produces.
+/// `input` construction/send (CLI-005/006) and snapshot tracking (CLI-007)
+/// are not wired up yet; today this carries what CLI-002 (connect +
+/// handshake), CLI-003 (baseline reception), and CLI-004 (tick floor
+/// tracking) produce.
 pub struct TestClient {
     host: ClientHost,
     welcome: ServerWelcome,
+    tick_floor: TickFloor,
+    baseline: Option<Baseline>,
 }
 
 impl TestClient {
     /// Connect to a Server Edge at `addr` and complete the handshake's
     /// first half: send `ClientHello`, await `ServerWelcome`. (CLI-002)
     ///
-    /// `JoinBaseline` reception (CLI-003) is left to a later call that
-    /// services [`TestClient::host_mut`], since the server sends it
+    /// Also initializes [`TestClient::tick_floor`] from
+    /// `ServerWelcome.target_tick_floor` (CLI-004). `JoinBaseline`
+    /// reception (CLI-003) is a separate call -- see
+    /// [`TestClient::recv_baseline`] -- since the server sends it
     /// immediately after `ServerWelcome` on the same Control channel.
     pub fn connect(addr: SocketAddr, timeout: Duration) -> Result<Self, ConnectError> {
         let (host, welcome) = connection::connect(addr, timeout)?;
-        Ok(Self { host, welcome })
+        let tick_floor = TickFloor::from_welcome(welcome.target_tick_floor);
+        Ok(Self {
+            host,
+            welcome,
+            tick_floor,
+            baseline: None,
+        })
     }
 
     /// The `ServerWelcome` received during the handshake.
@@ -64,8 +78,33 @@ impl TestClient {
     }
 
     /// The live ENet host backing this connection, for callers that need to
-    /// keep servicing it (CLI-003 onward).
+    /// keep servicing it directly (e.g. CLI-007 snapshot reception).
     pub fn host_mut(&mut self) -> &mut ClientHost {
         &mut self.host
+    }
+
+    /// Service the connection until `JoinBaseline` arrives, decode it, and
+    /// store the resulting `Baseline`. (CLI-003)
+    pub fn recv_baseline(&mut self, timeout: Duration) -> Result<&Baseline, BaselineError> {
+        let baseline = state::recv_baseline(&mut self.host, timeout)?;
+        Ok(self.baseline.insert(baseline))
+    }
+
+    /// The `Baseline` received via [`TestClient::recv_baseline`], if any.
+    pub fn baseline(&self) -> Option<&Baseline> {
+        self.baseline.as_ref()
+    }
+
+    /// The current locally tracked `TargetTickFloor` (DM-0025). (CLI-004)
+    pub fn tick_floor(&self) -> Tick {
+        self.tick_floor.get()
+    }
+
+    /// Fold a newly observed floor value into local tracking, taking
+    /// `max(current, received)` per ADR-0006. Called with
+    /// `SnapshotProto.target_tick_floor` once snapshot reception (CLI-007)
+    /// is wired up.
+    pub fn observe_tick_floor(&mut self, received: Tick) {
+        self.tick_floor.observe(received);
     }
 }

@@ -9,18 +9,20 @@ It is built architecture-first: a deterministic, server-authoritative simulation
 
 ## Status
 
-**v0 Multiplayer Slice Complete** (December 2025)
+**v0 Multiplayer Slice + Game Client Test Harness**
 
-The authoritative server foundation is implemented and validated:
+The authoritative server foundation, real ENet transport, and a Rust test client are implemented and validated end-to-end over the network:
 
 - **Simulation Core** (`crates/sim`) — Deterministic fixed-timestep world with FNV-1a state digest, WASD movement (5.0 units/sec)
 - **Wire Protocol** (`crates/wire`) — Protobuf message types (ClientHello, ServerWelcome, InputCmdProto, SnapshotProto, ReplayArtifact)
 - **Replay System** (`crates/replay`) — Full verification pipeline with initialization and outcome anchors
-- **Server Edge** (`crates/server`) — Input validation, buffer management, LastKnownIntent fallback, session lifecycle
+- **Server Edge** (`crates/server`) — Real ENet transport (two-channel host, paced tick loop), input validation, buffer management, LastKnownIntent fallback, session lifecycle; runnable as `cargo run -p flowstate-server`
+- **Game Client Test Harness** (`crates/client`) — Minimal ENet client proving the wire path: connect/handshake, baseline + snapshot reception, TargetTickFloor tracking, scripted input, movement verified to match the Simulation Core's own formula over a real network round trip (including a subprocess test against the actual compiled server binary, not just in-process)
+- **CI Tier-0 gates** — Simulation Core isolation (dependency allowlist + forbidden-API scan) and schema identity (client/server share one resolved wire crate) enforced via `just ci`
 
-**Test Coverage:** 58 tests passing (sim: 16, wire: 6, replay: 8, server: 28)
+**Test Coverage:** 71 tests passing (sim: 16, wire: 8, replay: 8, server: 31, client: 8)
 
-**What's Missing:** Networking transport layer (ENet integration) and game client. Server operates in "manual step mode" for now.
+**What's Missing:** The real player-facing Game Client. `crates/client` is a headless test harness (no rendering, no real input) used to validate the protocol — per ADR-0005 the actual client is intended to be built in Godot, using `ENetMultiplayerPeer` against this same server. The top-level `client/` directory is currently a placeholder.
 
 ## What we’re optimizing for
 

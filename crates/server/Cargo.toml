@@ -13,6 +13,7 @@ prost = "0.13"
 rusty_enet = "0.4"
 
 [dev-dependencies]
+flowstate-client = { path = "../client" }
 
 [lints.rust]
 unsafe_code = "deny"

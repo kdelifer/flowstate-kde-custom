@@ -27,6 +27,12 @@ pub fn run(config: ServerConfig, addr: SocketAddr) -> io::Result<ReplayArtifact>
     let tick_interval = Duration::from_secs_f64(1.0 / f64::from(config.tick_rate_hz));
 
     let mut host = net::bind_host(addr, 2)?;
+    // Definitive readiness signal: unlike a pre-bind log line, this can only
+    // print once the socket is actually bound, so callers (e.g. a
+    // subprocess-spawning test) can safely start connecting on sight of it
+    // instead of guessing a startup delay.
+    println!("flowstate-server: listening on {addr}");
+
     let mut server = Server::new(config);
     let mut peer_sessions: HashMap<enet::PeerID, SessionId> = HashMap::new();
 

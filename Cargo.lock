@@ -95,6 +95,7 @@ dependencies = [
 name = "flowstate-server"
 version = "0.0.0"
 dependencies = [
+ "flowstate-client",
  "flowstate-replay",
  "flowstate-sim",
  "flowstate-wire",

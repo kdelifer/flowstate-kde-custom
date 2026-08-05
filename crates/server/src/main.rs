@@ -13,7 +13,7 @@ fn main() {
     let config = ServerConfig::default();
 
     println!(
-        "flowstate-server: listening on {addr} (seed={}, tick_rate_hz={})",
+        "flowstate-server: starting on {addr} (seed={}, tick_rate_hz={})",
         config.seed, config.tick_rate_hz
     );
 

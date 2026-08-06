@@ -7,6 +7,14 @@
 # scheduling from the engine's own main loop -- the same code path the
 # playable demo scene uses, not a stand-in.
 #
+# Each client's own baseline reflects world state at the moment of ITS OWN
+# accept, not a shared match-start snapshot (server session model: sessions
+# join independently, at any time -- see docs/specs/FS-0007's session-model
+# revision note). Whichever client connects first may see only itself in
+# its baseline; this test checks each baseline contains at least that
+# client's own entity, then separately waits for both clients' live
+# snapshots to converge on 2 entities.
+#
 # Requires flowstate-server already running and listening on SERVER_PORT
 # (no in-script server spawn, same convention as G0.1).
 #
@@ -28,6 +36,9 @@ var client_a: NetworkClient
 var client_b: NetworkClient
 var _baseline_a: JoinBaseline
 var _baseline_b: JoinBaseline
+var _converged_a := false
+var _converged_b := false
+var _spawn_checked := false
 var _deadline_msec: int
 var _done := false
 
@@ -39,6 +50,8 @@ func _initialize() -> void:
 	root.add_child(client_b)
 	client_a.baseline_received.connect(_on_baseline_a)
 	client_b.baseline_received.connect(_on_baseline_b)
+	client_a.snapshot_received.connect(_on_snapshot_a)
+	client_b.snapshot_received.connect(_on_snapshot_b)
 	client_a.connect_to_server(SERVER_ADDR, SERVER_PORT)
 	client_b.connect_to_server(SERVER_ADDR, SERVER_PORT)
 	_deadline_msec = Time.get_ticks_msec() + DEADLINE_MS
@@ -52,58 +65,85 @@ func _on_baseline_b(b: JoinBaseline) -> void:
 	_baseline_b = b
 
 
+func _on_snapshot_a(s: SnapshotProto) -> void:
+	if s.entities.size() == 2:
+		_converged_a = true
+
+
+func _on_snapshot_b(s: SnapshotProto) -> void:
+	if s.entities.size() == 2:
+		_converged_b = true
+
+
 func _process(_delta: float) -> bool:
 	if _done:
 		return true
 
-	if _baseline_a != null and _baseline_b != null:
+	if _baseline_a != null and _baseline_b != null and not _spawn_checked:
+		_spawn_checked = true
+		if not _check_baseline_spawns():
+			_done = true
+			return true
+
+	if _spawn_checked and _converged_a and _converged_b:
 		_done = true
-		_finish()
+		print("G0.3 PASS: both clients' own baselines spawned entities at (0,0); live snapshots converged to 2 entities for both")
+		quit(0)
 		return true
 
 	if Time.get_ticks_msec() >= _deadline_msec:
 		_done = true
-		push_error("G0.3 FAIL: timed out waiting for both baselines (a=%s b=%s)" % [_baseline_a != null, _baseline_b != null])
+		push_error(
+			"G0.3 FAIL: timed out (baseline_a=%s baseline_b=%s converged_a=%s converged_b=%s)"
+			% [_baseline_a != null, _baseline_b != null, _converged_a, _converged_b]
+		)
 		quit(1)
 		return true
 
 	return false
 
 
-func _finish() -> void:
-	if _baseline_a.entities.size() != 2:
-		push_error("G0.3 FAIL: client_a baseline has %d entities, expected 2" % _baseline_a.entities.size())
+## Verifies each client's own baseline contains at least that client's own
+## entity, and every entity present in either baseline spawns at the exact
+## expected position. Returns false (and calls quit(1)) on failure.
+func _check_baseline_spawns() -> bool:
+	if _baseline_a.entities.is_empty():
+		push_error("G0.3 FAIL: client_a baseline is empty, expected at least its own entity")
 		quit(1)
-		return
-	if _baseline_b.entities.size() != 2:
-		push_error("G0.3 FAIL: client_b baseline has %d entities, expected 2" % _baseline_b.entities.size())
+		return false
+	if _baseline_b.entities.is_empty():
+		push_error("G0.3 FAIL: client_b baseline is empty, expected at least its own entity")
 		quit(1)
-		return
+		return false
 
-	if _baseline_a.tick != _baseline_b.tick or _baseline_a.digest != _baseline_b.digest:
-		push_error("G0.3 FAIL: baselines diverged: a(tick=%d digest=%d) b(tick=%d digest=%d)" % [_baseline_a.tick, _baseline_a.digest, _baseline_b.tick, _baseline_b.digest])
+	if not _contains_entity(_baseline_a, client_a.welcome().controlled_entity_id):
+		push_error("G0.3 FAIL: client_a's baseline does not contain its own controlled entity")
 		quit(1)
-		return
-
-	for i in range(2):
-		var ea: EntitySnapshotProto = _baseline_a.entities[i]
-		var eb: EntitySnapshotProto = _baseline_b.entities[i]
-		if ea.entity_id != eb.entity_id or ea.position != eb.position or ea.velocity != eb.velocity:
-			push_error("G0.3 FAIL: entity %d diverged between client_a and client_b" % i)
-			quit(1)
-			return
+		return false
+	if not _contains_entity(_baseline_b, client_b.welcome().controlled_entity_id):
+		push_error("G0.3 FAIL: client_b's baseline does not contain its own controlled entity")
+		quit(1)
+		return false
 
 	var scene: PackedScene = load("res://view/character_view.tscn")
-	for e in _baseline_a.entities:
-		var entity: EntitySnapshotProto = e
-		var view: CharacterView = scene.instantiate()
-		root.add_child(view)
-		view.entity_id = entity.entity_id
-		view.apply_state(entity.position, entity.velocity)
-		if view.global_position != EXPECTED_SPAWN_POSITION:
-			push_error("G0.3 FAIL: entity %d spawned at %s, expected %s" % [entity.entity_id, view.global_position, EXPECTED_SPAWN_POSITION])
-			quit(1)
-			return
+	for baseline in [_baseline_a, _baseline_b]:
+		for e in baseline.entities:
+			var entity: EntitySnapshotProto = e
+			var view: CharacterView = scene.instantiate()
+			root.add_child(view)
+			view.entity_id = entity.entity_id
+			view.apply_state(entity.position, entity.velocity)
+			if view.global_position != EXPECTED_SPAWN_POSITION:
+				push_error("G0.3 FAIL: entity %d spawned at %s, expected %s" % [entity.entity_id, view.global_position, EXPECTED_SPAWN_POSITION])
+				quit(1)
+				return false
 
-	print("G0.3 PASS: both clients received identical 2-entity baseline; CharacterViews spawned at (0,0)")
-	quit(0)
+	return true
+
+
+func _contains_entity(baseline: JoinBaseline, entity_id: int) -> bool:
+	for e in baseline.entities:
+		var entity: EntitySnapshotProto = e
+		if entity.entity_id == entity_id:
+			return true
+	return false

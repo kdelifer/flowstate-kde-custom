@@ -1,21 +1,21 @@
-[gd_scene load_steps=4 format=3]
+[gd_scene format=3 uid="uid://db5faainqm4j2"]
 
-[ext_resource type="Script" path="res://scenes/match_scene.gd" id="1"]
-[ext_resource type="Script" path="res://net/network_client.gd" id="2"]
-[ext_resource type="Script" path="res://input/input_capture.gd" id="3"]
+[ext_resource type="Script" uid="uid://b2f8pgrurypn6" path="res://scenes/match_scene.gd" id="1"]
+[ext_resource type="Script" uid="uid://civk70nu2axqu" path="res://net/network_client.gd" id="2"]
+[ext_resource type="Script" uid="uid://bgetol8pe8bwf" path="res://input/input_capture.gd" id="3"]
 
-[node name="MatchScene" type="Node3D"]
+[node name="MatchScene" type="Node3D" unique_id=887316793]
 script = ExtResource("1")
 
-[node name="NetworkClient" type="Node" parent="."]
+[node name="NetworkClient" type="Node" parent="." unique_id=1733898239]
 script = ExtResource("2")
 
-[node name="InputCapture" type="Node" parent="."]
+[node name="InputCapture" type="Node" parent="." unique_id=1529097389]
 script = ExtResource("3")
 
-[node name="Entities" type="Node3D" parent="."]
+[node name="Entities" type="Node3D" parent="." unique_id=542807047]
 
-[node name="Camera3D" type="Camera3D" parent="."]
+[node name="Camera3D" type="Camera3D" parent="." unique_id=542934651]
 current = true
 
-[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=622441697]

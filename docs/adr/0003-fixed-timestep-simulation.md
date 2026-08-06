@@ -30,8 +30,8 @@ The Simulation Core stepping API MUST be tick-driven and MUST NOT accept per-cal
 - Time-based gameplay rules SHOULD be authored in seconds (cooldowns, durations, speeds). Implementations MAY convert these to tick-domain constants at match initialization, provided the conversion is deterministic and derived solely from match configuration.
 
 ### Initial Supported Tick Rate
-- v0: 60 Hz (see [docs/networking/v0-parameters.md](../networking/v0-parameters.md))
-- Additional discrete tick rates (e.g., 30/120 Hz) require validation before adoption.
+- v0: 30 Hz (see [docs/networking/v0-parameters.md](../networking/v0-parameters.md))
+- Additional discrete tick rates (e.g., 60/120 Hz) require validation before adoption.
 
 ## Rationale
 **Why fixed timestep:**

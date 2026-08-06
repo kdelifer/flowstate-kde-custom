@@ -23,7 +23,8 @@ fn test_ci_004_replay_verification_against_real_match_artifact() {
     let mut server = Server::new(config);
     let (session_a, player_a, _) = server.accept_session();
     let (session_b, player_b, _) = server.accept_session();
-    server.start_match();
+    server.welcome_for(session_a);
+    server.welcome_for(session_b);
 
     // Pre-buffer input for every tick the match will actually process
     // (1..=NUM_MOVE_TICKS) before stepping at all -- submitted this early,

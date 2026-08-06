@@ -12,89 +12,46 @@ use rusty_enet as enet;
 
 use flowstate_wire::{ClientHello, InputCmdProto, ReplayArtifact};
 
-use crate::net::{self, CHANNEL_CONTROL, CHANNEL_REALTIME};
+use crate::net::{self, CHANNEL_CONTROL, CHANNEL_REALTIME, ServerHost};
 use crate::session::SessionId;
-use crate::{EndReason, Server, ServerConfig};
+use crate::{Server, ServerConfig};
 
-/// Run a full match: accept connections, handshake, then tick until the
-/// match ends (completion or disconnect).
+/// Bound on consecutive `service()` errors retried within a single drain
+/// pass, before giving up until the next tick.
 ///
-/// Blocking. Returns `Err` if the connect phase times out before two
-/// sessions join (SRV-004 / T0.16); otherwise returns the finalized replay
-/// artifact.
-pub fn run(config: ServerConfig, addr: SocketAddr) -> io::Result<ReplayArtifact> {
-    let connect_timeout = Duration::from_millis(config.connect_timeout_ms);
-    let tick_interval = Duration::from_secs_f64(1.0 / f64::from(config.tick_rate_hz));
+/// `enet_host_service` does, in order: dispatch already-queued events,
+/// send outgoing commands (including peer timeout checks), ONE socket
+/// receive pass, send outgoing again, dispatch. A Windows WSAECONNRESET
+/// surfaced by an ICMP port-unreachable bounce (e.g. from a peer that quit
+/// without a clean ENet disconnect, while the server keeps broadcasting to
+/// its now-dead address every tick) aborts that whole call, including any
+/// *other* peer's genuinely pending packet sitting in the socket buffer
+/// behind the errored read. The error is one-shot per triggering send, so
+/// retrying immediately almost always succeeds -- without this, a dead
+/// peer's error can recur on literally every tick's first service() call
+/// until ENet's own peer timeout fires (5-30s by default), starving every
+/// other connected session's input for that whole window instead of just
+/// deferring the one erroring peer.
+const MAX_CONSECUTIVE_SERVICE_ERRORS: u32 = 32;
 
-    let mut host = net::bind_host(addr, 2)?;
-    // Definitive readiness signal: unlike a pre-bind log line, this can only
-    // print once the socket is actually bound, so callers (e.g. a
-    // subprocess-spawning test) can safely start connecting on sight of it
-    // instead of guessing a startup delay.
-    println!("flowstate-server: listening on {addr}");
+/// Accept a newly-seen peer's `ClientHello` as a session and immediately
+/// send it that session's own `ServerWelcome` + `JoinBaseline`, reflecting
+/// the world's current state at the moment of accept -- not a shared,
+/// batched match-start snapshot. Used both while waiting for the first
+/// session and, continuously, for every later joiner (SRV-009).
+fn accept_and_welcome(
+    host: &mut ServerHost,
+    server: &mut Server,
+    peer_sessions: &mut HashMap<enet::PeerID, SessionId>,
+    peer_id: enet::PeerID,
+) {
+    let (session_id, _player_id, _entity_id) = server.accept_session();
+    peer_sessions.insert(peer_id, session_id);
 
-    let mut server = Server::new(config);
-    let mut peer_sessions: HashMap<enet::PeerID, SessionId> = HashMap::new();
-
-    // --- Phase 1: accept connections + ClientHello handshake (SRV-004, SRV-009) ---
-    let accept_deadline = Instant::now() + connect_timeout;
-    while server.session_count() < 2 {
-        if Instant::now() >= accept_deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "connect_timeout_ms exceeded before two sessions connected",
-            ));
-        }
-
-        loop {
-            match host.service() {
-                Ok(Some(enet::Event::Receive {
-                    peer,
-                    channel_id,
-                    packet,
-                })) => {
-                    let peer_id = peer.id();
-                    if channel_id == CHANNEL_CONTROL
-                        && server.session_count() < 2
-                        && !peer_sessions.contains_key(&peer_id)
-                        && ClientHello::decode(packet.data()).is_ok()
-                    {
-                        let (session_id, _player_id, _entity_id) = server.accept_session();
-                        peer_sessions.insert(peer_id, session_id);
-                    }
-                }
-                Ok(Some(_)) => {}
-                Ok(None) => break,
-                Err(e) => {
-                    // A single peer's abrupt exit (e.g. Windows WSAECONNRESET
-                    // surfaced from an ICMP port-unreachable bounce) must not
-                    // take the whole accept phase down. Treat as a transient,
-                    // ignorable read failure and retry on the next poll.
-                    eprintln!(
-                        "flowstate-server: transient service() error during connect phase, continuing: {e:?}"
-                    );
-                    break;
-                }
-            }
-        }
-
-        std::thread::sleep(Duration::from_millis(1));
-    }
-
-    // --- Phase 2: start match, send ServerWelcome + JoinBaseline (SRV-009) ---
-    let (_baseline, welcomes) = server.start_match();
+    let welcome_bytes = server.welcome_for(session_id).encode_to_vec();
     let baseline_bytes = server.baseline_proto().encode_to_vec();
-    let session_peers: HashMap<SessionId, enet::PeerID> =
-        peer_sessions.iter().map(|(&p, &s)| (s, p)).collect();
 
-    for (session_id, welcome) in &welcomes {
-        let Some(&peer_id) = session_peers.get(session_id) else {
-            continue;
-        };
-        let Some(peer) = host.get_peer_mut(peer_id) else {
-            continue;
-        };
-        let welcome_bytes = welcome.encode_to_vec();
+    if let Some(peer) = host.get_peer_mut(peer_id) {
         let _ = peer.send(
             CHANNEL_CONTROL,
             &enet::Packet::reliable(welcome_bytes.as_slice()),
@@ -104,15 +61,43 @@ pub fn run(config: ServerConfig, addr: SocketAddr) -> io::Result<ReplayArtifact>
             &enet::Packet::reliable(baseline_bytes.as_slice()),
         );
     }
+}
 
-    // --- Phase 3: paced tick loop (LOOP-001, LOOP-004, LOOP-005, LOOP-006) ---
-    let mut next_tick_at = Instant::now();
-    let end_reason = loop {
-        if let Some(reason) = server.should_end_match() {
-            break reason;
+/// Run the server: accept sessions (one or many, joining at any time), then
+/// tick until the match ends. A session disconnecting does not affect any
+/// other session or end the match (SRV-004, SRV-009).
+///
+/// Blocking. Returns `Err` if the connect phase times out before *any*
+/// session joins (T0.16, threshold adjusted from 2 sessions to 1 under the
+/// N-session model); otherwise returns the finalized replay artifact.
+pub fn run(config: ServerConfig, addr: SocketAddr) -> io::Result<ReplayArtifact> {
+    let connect_timeout = Duration::from_millis(config.connect_timeout_ms);
+    let tick_interval = Duration::from_secs_f64(1.0 / f64::from(config.tick_rate_hz));
+    let max_sessions = config.max_sessions;
+
+    let mut host = net::bind_host(addr, max_sessions)?;
+    // Definitive readiness signal: unlike a pre-bind log line, this can only
+    // print once the socket is actually bound, so callers (e.g. a
+    // subprocess-spawning test) can safely start connecting on sight of it
+    // instead of guessing a startup delay.
+    println!("flowstate-server: listening on {addr}");
+
+    let mut server = Server::new(config);
+    let mut peer_sessions: HashMap<enet::PeerID, SessionId> = HashMap::new();
+
+    // --- Wait for the FIRST session; the world begins ticking once at
+    // least one has joined (does not wait for a second, unlike the old v0
+    // model) ---
+    let accept_deadline = Instant::now() + connect_timeout;
+    while server.session_count() < 1 {
+        if Instant::now() >= accept_deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "connect_timeout_ms exceeded before any session connected",
+            ));
         }
 
-        // Drain and buffer inputs received since the last tick (LOOP-004).
+        let mut consecutive_errors = 0u32;
         loop {
             match host.service() {
                 Ok(Some(enet::Event::Receive {
@@ -120,15 +105,75 @@ pub fn run(config: ServerConfig, addr: SocketAddr) -> io::Result<ReplayArtifact>
                     channel_id,
                     packet,
                 })) => {
-                    if channel_id == CHANNEL_REALTIME
-                        && let Some(&session_id) = peer_sessions.get(&peer.id())
+                    let peer_id = peer.id();
+                    if channel_id == CHANNEL_CONTROL
+                        && !peer_sessions.contains_key(&peer_id)
+                        && ClientHello::decode(packet.data()).is_ok()
+                    {
+                        accept_and_welcome(&mut host, &mut server, &mut peer_sessions, peer_id);
+                    }
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(e) => {
+                    consecutive_errors += 1;
+                    if consecutive_errors == 1 {
+                        eprintln!(
+                            "flowstate-server: transient service() error during connect phase, retrying: {e:?}"
+                        );
+                    } else if consecutive_errors >= MAX_CONSECUTIVE_SERVICE_ERRORS {
+                        eprintln!(
+                            "flowstate-server: {consecutive_errors} consecutive service() errors during connect phase, deferring to next poll (last: {e:?})"
+                        );
+                        break;
+                    }
+                    // Otherwise retry immediately -- see
+                    // MAX_CONSECUTIVE_SERVICE_ERRORS's doc comment.
+                }
+            }
+        }
+
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    // --- Paced tick loop (LOOP-001, LOOP-004, LOOP-005, LOOP-006). Also
+    // continuously accepts new sessions (what the wait-for-first-session
+    // loop above did once, now running for the server's whole lifetime)
+    // and handles disconnects -- neither ends the match. ---
+    let mut next_tick_at = Instant::now();
+    let end_reason = loop {
+        if let Some(reason) = server.should_end_match() {
+            break reason;
+        }
+
+        let mut consecutive_errors = 0u32;
+        loop {
+            match host.service() {
+                Ok(Some(enet::Event::Receive {
+                    peer,
+                    channel_id,
+                    packet,
+                })) => {
+                    let peer_id = peer.id();
+                    if channel_id == CHANNEL_CONTROL
+                        && !peer_sessions.contains_key(&peer_id)
+                        && ClientHello::decode(packet.data()).is_ok()
+                    {
+                        accept_and_welcome(&mut host, &mut server, &mut peer_sessions, peer_id);
+                    } else if channel_id == CHANNEL_REALTIME
+                        && let Some(&session_id) = peer_sessions.get(&peer_id)
                         && let Ok(input) = InputCmdProto::decode(packet.data())
                     {
                         let _ = server.receive_input(session_id, input);
                     }
                 }
                 Ok(Some(enet::Event::Disconnect { peer, .. })) => {
-                    if let Some(&session_id) = peer_sessions.get(&peer.id()) {
+                    // Remove the peer->session mapping too, not just the
+                    // server-side session bookkeeping -- otherwise a later
+                    // reconnect that happens to reuse this ENet peer slot
+                    // would incorrectly resolve to the stale, now-invalid
+                    // session_id.
+                    if let Some(session_id) = peer_sessions.remove(&peer.id()) {
                         server.disconnect_session(session_id);
                     }
                 }
@@ -140,22 +185,29 @@ pub fn run(config: ServerConfig, addr: SocketAddr) -> io::Result<ReplayArtifact>
                     // take the whole match down for every other connected
                     // session. ENet's own peer-timeout logic will surface a
                     // proper Event::Disconnect for the actually-dead peer on
-                    // a later service() call; treat this as a transient,
-                    // ignorable read failure rather than a fatal server
-                    // error.
-                    eprintln!("flowstate-server: transient service() error, continuing: {e:?}");
-                    break;
+                    // a later service() call; retry within this same drain
+                    // (bounded) rather than immediately deferring to the
+                    // next tick, since bailing on the first error would
+                    // starve every OTHER connected session's genuinely
+                    // pending packets sitting behind it in the socket
+                    // buffer -- see MAX_CONSECUTIVE_SERVICE_ERRORS's doc
+                    // comment.
+                    consecutive_errors += 1;
+                    if consecutive_errors == 1 {
+                        eprintln!("flowstate-server: transient service() error, retrying: {e:?}");
+                    } else if consecutive_errors >= MAX_CONSECUTIVE_SERVICE_ERRORS {
+                        eprintln!(
+                            "flowstate-server: {consecutive_errors} consecutive service() errors, deferring to next tick (last: {e:?})"
+                        );
+                        break;
+                    }
                 }
             }
         }
 
-        if server.has_disconnect() {
-            break EndReason::Disconnect;
-        }
-
         // Advance the simulation and broadcast (LOOP-005, LOOP-006, SRV-023).
         // Single serialization, single broadcast call -> byte-identical for
-        // all sessions by construction (T0.18).
+        // all currently-connected sessions by construction (T0.18).
         let (_snapshot, _floor, snapshot_bytes) = server.step();
         host.broadcast(
             CHANNEL_REALTIME,

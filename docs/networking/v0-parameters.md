@@ -7,15 +7,15 @@ These values may change as we iterate, without requiring changes to invariants o
 
 | Parameter | Value | Notes |
 |---|---:|---|
-| tick_rate_hz | 60 | Authoritative simulation tick rate for v0 matches |
-| snapshot_rate_hz | 60 | One snapshot per tick (v0 simplicity) |
-| input_send_rate_hz | 60 | Target send rate; may be clamped to tick rate |
+| tick_rate_hz | 30 | Authoritative simulation tick rate for v0 matches |
+| snapshot_rate_hz | 30 | One snapshot per tick (v0 simplicity) |
+| input_send_rate_hz | 30 | Target send rate; may be clamped to tick rate |
 | input_rate_limit_per_sec | 120 | Tier-0 spam control |
-| max_future_ticks | 120 | Maximum ticks ahead a client can target (InputTickWindow upper bound) |
+| max_future_ticks | 60 | Maximum ticks ahead a client can target (InputTickWindow upper bound); kept proportional to tick_rate_hz (2 seconds of lookahead) |
 | input_tick_window | `[current_tick, current_tick + max_future_ticks]` | Future-only acceptance; late inputs dropped |
 | input_lead_ticks | 1 | TargetTickFloor = server.current_tick + input_lead_ticks |
-| match_duration_ticks | 3600 | Match duration (60 seconds at 60 Hz); defines checkpoint_tick for "complete" end_reason |
-| connect_timeout_ms | 30000 | Connection timeout (30 seconds); server aborts if < 2 sessions connect within this window |
+| match_duration_ticks | 1800 | Match duration (60 seconds at 30 Hz); kept proportional to tick_rate_hz; defines checkpoint_tick for "complete" end_reason |
+| connect_timeout_ms | 30000 | Connection timeout (30 seconds); server aborts if no session connects within this window. The world begins ticking once the first session joins -- does not wait for a second (see FS-0007 revision note on the session model). |
 
 ## Parameter definitions
 

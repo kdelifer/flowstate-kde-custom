@@ -44,7 +44,7 @@ fn test_cli_007_poll_snapshot_receives_and_updates_floor() {
     let controlled_entity_id = client_a.welcome().controlled_entity_id;
 
     // Poll until at least one snapshot has arrived (LOOP-001 paces ticks at
-    // 60Hz, so this should resolve within a couple of ticks on loopback).
+    // 30Hz, so this should resolve within a couple of ticks on loopback).
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut seen_tick = None;
     while Instant::now() < deadline && seen_tick.is_none() {

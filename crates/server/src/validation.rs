@@ -24,9 +24,9 @@ pub struct ValidationConfig {
 impl Default for ValidationConfig {
     fn default() -> Self {
         Self {
-            max_future_ticks: 120,
+            max_future_ticks: 60,
             input_rate_limit_per_sec: 120,
-            tick_rate_hz: 60,
+            tick_rate_hz: 30,
         }
     }
 }
@@ -50,9 +50,10 @@ pub enum ValidationResult {
     DroppedRateLimit,
     /// Dropped: InputSeq tied for this (player, tick).
     DroppedInputSeqTie,
-    /// Dropped: Received before ServerWelcome.
-    DroppedPreWelcome,
-    /// Dropped: Unknown session.
+    /// Dropped: unknown session -- covers both a session that was never
+    /// accepted and one whose welcome hasn't landed yet, since accept and
+    /// welcome now happen synchronously in the same tick_loop iteration
+    /// (no window exists where a session is known but not yet welcomed).
     DroppedUnknownSession,
 }
 

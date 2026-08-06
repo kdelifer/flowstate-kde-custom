@@ -804,13 +804,15 @@ CI script: `scripts/check_sim_isolation.py` or inline `just` target
 
 ### Setup
 1. Start server with `connect_timeout_ms=1000` (shortened for test)
-2. Connect only one client (or zero clients)
+2. Connect zero clients
 3. Wait for timeout to expire
 
 ### Assertions
 **Timeout behavior:**
 1. Server waits up to connect_timeout_ms
-2. If < 2 sessions connect, server aborts
+2. If 0 sessions connect, server aborts (revised: the world begins ticking
+   once the first session joins, so one connected client no longer risks
+   this timeout -- see FS-0007's session-model revision note)
 
 **Exit behavior:**
 3. Server exits with **non-zero exit code**

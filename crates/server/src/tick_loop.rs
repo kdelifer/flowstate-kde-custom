@@ -46,24 +46,34 @@ pub fn run(config: ServerConfig, addr: SocketAddr) -> io::Result<ReplayArtifact>
             ));
         }
 
-        while let Some(event) = host
-            .service()
-            .map_err(|e| io::Error::other(format!("ENet service error: {e:?}")))?
-        {
-            if let enet::Event::Receive {
-                peer,
-                channel_id,
-                packet,
-            } = event
-            {
-                let peer_id = peer.id();
-                if channel_id == CHANNEL_CONTROL
-                    && server.session_count() < 2
-                    && !peer_sessions.contains_key(&peer_id)
-                    && ClientHello::decode(packet.data()).is_ok()
-                {
-                    let (session_id, _player_id, _entity_id) = server.accept_session();
-                    peer_sessions.insert(peer_id, session_id);
+        loop {
+            match host.service() {
+                Ok(Some(enet::Event::Receive {
+                    peer,
+                    channel_id,
+                    packet,
+                })) => {
+                    let peer_id = peer.id();
+                    if channel_id == CHANNEL_CONTROL
+                        && server.session_count() < 2
+                        && !peer_sessions.contains_key(&peer_id)
+                        && ClientHello::decode(packet.data()).is_ok()
+                    {
+                        let (session_id, _player_id, _entity_id) = server.accept_session();
+                        peer_sessions.insert(peer_id, session_id);
+                    }
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => break,
+                Err(e) => {
+                    // A single peer's abrupt exit (e.g. Windows WSAECONNRESET
+                    // surfaced from an ICMP port-unreachable bounce) must not
+                    // take the whole accept phase down. Treat as a transient,
+                    // ignorable read failure and retry on the next poll.
+                    eprintln!(
+                        "flowstate-server: transient service() error during connect phase, continuing: {e:?}"
+                    );
+                    break;
                 }
             }
         }
@@ -103,16 +113,13 @@ pub fn run(config: ServerConfig, addr: SocketAddr) -> io::Result<ReplayArtifact>
         }
 
         // Drain and buffer inputs received since the last tick (LOOP-004).
-        while let Some(event) = host
-            .service()
-            .map_err(|e| io::Error::other(format!("ENet service error: {e:?}")))?
-        {
-            match event {
-                enet::Event::Receive {
+        loop {
+            match host.service() {
+                Ok(Some(enet::Event::Receive {
                     peer,
                     channel_id,
                     packet,
-                } => {
+                })) => {
                     if channel_id == CHANNEL_REALTIME
                         && let Some(&session_id) = peer_sessions.get(&peer.id())
                         && let Ok(input) = InputCmdProto::decode(packet.data())
@@ -120,12 +127,25 @@ pub fn run(config: ServerConfig, addr: SocketAddr) -> io::Result<ReplayArtifact>
                         let _ = server.receive_input(session_id, input);
                     }
                 }
-                enet::Event::Disconnect { peer, .. } => {
+                Ok(Some(enet::Event::Disconnect { peer, .. })) => {
                     if let Some(&session_id) = peer_sessions.get(&peer.id()) {
                         server.disconnect_session(session_id);
                     }
                 }
-                enet::Event::Connect { .. } => {}
+                Ok(Some(enet::Event::Connect { .. })) => {}
+                Ok(None) => break,
+                Err(e) => {
+                    // A single peer's abrupt exit (e.g. Windows WSAECONNRESET
+                    // surfaced from an ICMP port-unreachable bounce) must not
+                    // take the whole match down for every other connected
+                    // session. ENet's own peer-timeout logic will surface a
+                    // proper Event::Disconnect for the actually-dead peer on
+                    // a later service() call; treat this as a transient,
+                    // ignorable read failure rather than a fatal server
+                    // error.
+                    eprintln!("flowstate-server: transient service() error, continuing: {e:?}");
+                    break;
+                }
             }
         }
 

@@ -24,9 +24,9 @@ pub struct ValidationConfig {
 impl Default for ValidationConfig {
     fn default() -> Self {
         Self {
-            max_future_ticks: 120,
+            max_future_ticks: 60,
             input_rate_limit_per_sec: 120,
-            tick_rate_hz: 60,
+            tick_rate_hz: 30,
         }
     }
 }

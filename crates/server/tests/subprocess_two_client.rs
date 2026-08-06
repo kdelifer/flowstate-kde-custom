@@ -81,7 +81,7 @@ fn test_two_clients_connect_to_server_subprocess() {
     wait_for_listening(&mut child);
     // From here on, ensure the subprocess is killed no matter how the test
     // exits (success, assertion panic, or early return) -- we deliberately
-    // don't wait for the default match_duration_ticks=3600 (60s at 60Hz) to
+    // don't wait for the default match_duration_ticks=1800 (60s at 30Hz) to
     // elapse naturally.
     let _guard = KillOnDrop(child);
 
@@ -104,7 +104,7 @@ fn test_two_clients_connect_to_server_subprocess() {
     assert_ne!(client_a.welcome().player_id, client_b.welcome().player_id);
     assert!(client_a.welcome().controlled_entity_id > 0);
     assert!(client_b.welcome().controlled_entity_id > 0);
-    assert_eq!(client_a.welcome().tick_rate_hz, 60);
+    assert_eq!(client_a.welcome().tick_rate_hz, 30);
     assert_eq!(client_a.tick_floor(), 1);
 
     // T0.2: each client's JoinBaseline reflects world state at the moment

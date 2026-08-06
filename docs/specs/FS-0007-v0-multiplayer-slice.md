@@ -275,7 +275,7 @@ Server Edge validates inputs BEFORE converting to StepInput. Parameters from [v0
 
 ## Snapshot Transmission
 
-**v0 Rate:** One snapshot per tick. Per [v0-parameters.md](../networking/v0-parameters.md), `snapshot_rate_hz MUST == tick_rate_hz` for v0. Server MUST broadcast SnapshotProto after every `world.advance()`. *Non-normative: For v0 parameters, both are 60 Hz.*
+**v0 Rate:** One snapshot per tick. Per [v0-parameters.md](../networking/v0-parameters.md), `snapshot_rate_hz MUST == tick_rate_hz` for v0. Server MUST broadcast SnapshotProto after every `world.advance()`. *Non-normative: For v0 parameters, both are 30 Hz.*
 
 **Server Tick Definition at Emission (Normative):** When the spec or ADR-0006 refers to "server.current_tick" at the time of snapshot/floor emission, this means the post-step world tick (`world.tick()` after `advance()` completes), not the pre-step tick. The TargetTickFloor computation uses this post-step tick value. *Rationale: Eliminates classic off-by-one ambiguity between pre-step tick T (being processed) and post-step tick T+1 (after advance).*
 
@@ -293,7 +293,7 @@ Server Edge validates inputs BEFORE converting to StepInput. Parameters from [v0
 
 ## Server Tick Loop (Non-Normative Pseudocode)
 
-Parameter values referenced from [v0-parameters.md](../networking/v0-parameters.md). *Non-normative example values for v0: `tick_rate_hz=60`, `max_future_ticks=120`, `input_lead_ticks=1`, `match_duration_ticks=3600`, `connect_timeout_ms=30000`.*
+Parameter values referenced from [v0-parameters.md](../networking/v0-parameters.md). *Non-normative example values for v0: `tick_rate_hz=30`, `max_future_ticks=60`, `input_lead_ticks=1`, `match_duration_ticks=1800`, `connect_timeout_ms=30000`.*
 
 **Test Harness Note (Normative):** In tests, the server tick loop MUST be runnable in 'manual step' mode without wall-clock pacing (e.g., explicit `server.tick()` calls). CI MUST NOT sleep for match duration.
 

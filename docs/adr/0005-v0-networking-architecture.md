@@ -53,7 +53,7 @@ For v0, we use:
   - Justification: Fast iteration now, formal schemas later without protocol changes
 - **Explicit JoinBaseline** on Control Channel for initial state transfer
   - Justification: Avoids ambiguity; client knows when it's synchronized
-- **60 Hz tick rate**, **unreliable snapshots** @ 60 Hz, **unreliable inputs** @ 60 Hz
+- **30 Hz tick rate**, **unreliable snapshots** @ 30 Hz, **unreliable inputs** @ 30 Hz
   - See [docs/networking/v0-parameters.md](../networking/v0-parameters.md) for tunables
   - Justification: Simple 1:1 tick-to-snapshot-to-input mapping for v0
 - **Tier-0 input validation:** magnitude limit, tick window, rate limit

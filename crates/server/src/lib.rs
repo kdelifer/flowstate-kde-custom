@@ -44,10 +44,11 @@ use validation::{ValidationConfig, ValidationResult, validate_input};
 // ============================================================================
 
 /// v0 tick rate in Hz.
-pub const TICK_RATE_HZ: u32 = 60;
+pub const TICK_RATE_HZ: u32 = 30;
 
-/// Maximum ticks ahead a client can target.
-pub const MAX_FUTURE_TICKS: u64 = 120;
+/// Maximum ticks ahead a client can target. Kept proportional to
+/// TICK_RATE_HZ (2 seconds of lookahead) when the tick rate changes.
+pub const MAX_FUTURE_TICKS: u64 = 60;
 
 /// TargetTickFloor lead.
 pub const INPUT_LEAD_TICKS: u64 = 1;
@@ -55,8 +56,9 @@ pub const INPUT_LEAD_TICKS: u64 = 1;
 /// Input rate limit per second.
 pub const INPUT_RATE_LIMIT_PER_SEC: u32 = 120;
 
-/// Match duration in ticks.
-pub const MATCH_DURATION_TICKS: u64 = 3600;
+/// Match duration in ticks. Kept proportional to TICK_RATE_HZ (60 real
+/// seconds) when the tick rate changes.
+pub const MATCH_DURATION_TICKS: u64 = 1800;
 
 /// Connection timeout in milliseconds.
 pub const CONNECT_TIMEOUT_MS: u64 = 30000;
@@ -756,7 +758,7 @@ mod tests {
 
         assert_eq!(artifact.replay_format_version, 1);
         assert!(artifact.initial_baseline.is_some());
-        assert_eq!(artifact.tick_rate_hz, 60);
+        assert_eq!(artifact.tick_rate_hz, TICK_RATE_HZ);
         assert_eq!(artifact.checkpoint_tick, 5);
         assert_eq!(artifact.end_reason, "complete");
         // 5 ticks * 2 players = 10 inputs

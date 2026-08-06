@@ -47,7 +47,7 @@ fn test_cli_002_connect_and_handshake() {
     assert_ne!(result_a.welcome().player_id, result_b.welcome().player_id);
     assert!(result_a.welcome().controlled_entity_id > 0);
     assert!(result_b.welcome().controlled_entity_id > 0);
-    assert_eq!(result_a.welcome().tick_rate_hz, 60);
+    assert_eq!(result_a.welcome().tick_rate_hz, 30);
     assert_eq!(result_a.welcome().target_tick_floor, 1);
 
     // Match still ran to completion independent of the client's own pacing.

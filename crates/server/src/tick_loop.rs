@@ -16,6 +16,24 @@ use crate::net::{self, CHANNEL_CONTROL, CHANNEL_REALTIME, ServerHost};
 use crate::session::SessionId;
 use crate::{Server, ServerConfig};
 
+/// Bound on consecutive `service()` errors retried within a single drain
+/// pass, before giving up until the next tick.
+///
+/// `enet_host_service` does, in order: dispatch already-queued events,
+/// send outgoing commands (including peer timeout checks), ONE socket
+/// receive pass, send outgoing again, dispatch. A Windows WSAECONNRESET
+/// surfaced by an ICMP port-unreachable bounce (e.g. from a peer that quit
+/// without a clean ENet disconnect, while the server keeps broadcasting to
+/// its now-dead address every tick) aborts that whole call, including any
+/// *other* peer's genuinely pending packet sitting in the socket buffer
+/// behind the errored read. The error is one-shot per triggering send, so
+/// retrying immediately almost always succeeds -- without this, a dead
+/// peer's error can recur on literally every tick's first service() call
+/// until ENet's own peer timeout fires (5-30s by default), starving every
+/// other connected session's input for that whole window instead of just
+/// deferring the one erroring peer.
+const MAX_CONSECUTIVE_SERVICE_ERRORS: u32 = 32;
+
 /// Accept a newly-seen peer's `ClientHello` as a session and immediately
 /// send it that session's own `ServerWelcome` + `JoinBaseline`, reflecting
 /// the world's current state at the moment of accept -- not a shared,
@@ -79,6 +97,7 @@ pub fn run(config: ServerConfig, addr: SocketAddr) -> io::Result<ReplayArtifact>
             ));
         }
 
+        let mut consecutive_errors = 0u32;
         loop {
             match host.service() {
                 Ok(Some(enet::Event::Receive {
@@ -97,14 +116,19 @@ pub fn run(config: ServerConfig, addr: SocketAddr) -> io::Result<ReplayArtifact>
                 Ok(Some(_)) => {}
                 Ok(None) => break,
                 Err(e) => {
-                    // A single peer's abrupt exit (e.g. Windows WSAECONNRESET
-                    // surfaced from an ICMP port-unreachable bounce) must not
-                    // take the whole accept phase down. Treat as a transient,
-                    // ignorable read failure and retry on the next poll.
-                    eprintln!(
-                        "flowstate-server: transient service() error during connect phase, continuing: {e:?}"
-                    );
-                    break;
+                    consecutive_errors += 1;
+                    if consecutive_errors == 1 {
+                        eprintln!(
+                            "flowstate-server: transient service() error during connect phase, retrying: {e:?}"
+                        );
+                    } else if consecutive_errors >= MAX_CONSECUTIVE_SERVICE_ERRORS {
+                        eprintln!(
+                            "flowstate-server: {consecutive_errors} consecutive service() errors during connect phase, deferring to next poll (last: {e:?})"
+                        );
+                        break;
+                    }
+                    // Otherwise retry immediately -- see
+                    // MAX_CONSECUTIVE_SERVICE_ERRORS's doc comment.
                 }
             }
         }
@@ -122,6 +146,7 @@ pub fn run(config: ServerConfig, addr: SocketAddr) -> io::Result<ReplayArtifact>
             break reason;
         }
 
+        let mut consecutive_errors = 0u32;
         loop {
             match host.service() {
                 Ok(Some(enet::Event::Receive {
@@ -160,11 +185,22 @@ pub fn run(config: ServerConfig, addr: SocketAddr) -> io::Result<ReplayArtifact>
                     // take the whole match down for every other connected
                     // session. ENet's own peer-timeout logic will surface a
                     // proper Event::Disconnect for the actually-dead peer on
-                    // a later service() call; treat this as a transient,
-                    // ignorable read failure rather than a fatal server
-                    // error.
-                    eprintln!("flowstate-server: transient service() error, continuing: {e:?}");
-                    break;
+                    // a later service() call; retry within this same drain
+                    // (bounded) rather than immediately deferring to the
+                    // next tick, since bailing on the first error would
+                    // starve every OTHER connected session's genuinely
+                    // pending packets sitting behind it in the socket
+                    // buffer -- see MAX_CONSECUTIVE_SERVICE_ERRORS's doc
+                    // comment.
+                    consecutive_errors += 1;
+                    if consecutive_errors == 1 {
+                        eprintln!("flowstate-server: transient service() error, retrying: {e:?}");
+                    } else if consecutive_errors >= MAX_CONSECUTIVE_SERVICE_ERRORS {
+                        eprintln!(
+                            "flowstate-server: {consecutive_errors} consecutive service() errors, deferring to next tick (last: {e:?})"
+                        );
+                        break;
+                    }
                 }
             }
         }

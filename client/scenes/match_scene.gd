@@ -17,9 +17,15 @@ const CHARACTER_VIEW_SCENE := preload("res://view/character_view.tscn")
 @onready var _camera: Camera3D = $Camera3D
 @onready var _light: DirectionalLight3D = $DirectionalLight3D
 
+## Real ceiling on how long window close waits for the ENet disconnect
+## handshake to actually complete before quitting anyway -- e.g. if the
+## server is already gone, no disconnect ack will ever arrive.
+const CLOSE_DISCONNECT_TIMEOUT_SEC := 0.5
+
 var _match_state := MatchState.new()
 ## entity_id (int) -> CharacterView
 var _views: Dictionary = {}
+var _closing := false
 
 
 func _ready() -> void:
@@ -27,10 +33,29 @@ func _ready() -> void:
 	_camera.look_at(Vector3(0.0, CharacterView.FIXED_HEIGHT, 0.0), Vector3.UP)
 	_light.rotation_degrees = Vector3(-45.0, -30.0, 0.0)
 
+	# Godot's default WM_CLOSE_REQUEST handling quits immediately -- too
+	# fast for peer_disconnect()'s queued packet to actually reach the
+	# server (it's only flushed by a later service()/flush() call). Take
+	# over quitting ourselves so a normal window close performs a real
+	# clean ENet disconnect instead of an abrupt one (which otherwise
+	# produces a Windows WSAECONNRESET/ICMP-unreachable error storm
+	# server-side, and can delay other connected players' input for
+	# several seconds until ENet's own peer timeout fires).
+	get_tree().set_auto_accept_quit(false)
+
 	_network_client.baseline_received.connect(_on_baseline_received)
 	_network_client.snapshot_received.connect(_on_snapshot_received)
 	_input_capture.move_dir_changed.connect(_on_move_dir_changed)
 	_network_client.connect_to_server(SERVER_ADDR, SERVER_PORT)
+
+
+func _notification(what: int) -> void:
+	if what != NOTIFICATION_WM_CLOSE_REQUEST or _closing:
+		return
+	_closing = true
+	_network_client.disconnect_clean()
+	_network_client.disconnected.connect(get_tree().quit, CONNECT_ONE_SHOT)
+	get_tree().create_timer(CLOSE_DISCONNECT_TIMEOUT_SEC).timeout.connect(get_tree().quit)
 
 
 func _on_baseline_received(baseline: JoinBaseline) -> void:

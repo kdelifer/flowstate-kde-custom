@@ -15,7 +15,7 @@ These values may change as we iterate, without requiring changes to invariants o
 | input_tick_window | `[current_tick, current_tick + max_future_ticks]` | Future-only acceptance; late inputs dropped |
 | input_lead_ticks | 1 | TargetTickFloor = server.current_tick + input_lead_ticks |
 | match_duration_ticks | 3600 | Match duration (60 seconds at 60 Hz); defines checkpoint_tick for "complete" end_reason |
-| connect_timeout_ms | 30000 | Connection timeout (30 seconds); server aborts if < 2 sessions connect within this window |
+| connect_timeout_ms | 30000 | Connection timeout (30 seconds); server aborts if no session connects within this window. The world begins ticking once the first session joins -- does not wait for a second (see FS-0007 revision note on the session model). |
 
 ## Parameter definitions
 

@@ -281,9 +281,9 @@ Tasks are ordered by dependency. Within each section, tasks are listed in implem
 - [ ] **T0.12a:** Non-canonical AppliedInput storage order test: verifier canonicalizes successfully, dev warning allowed
 - [ ] **T0.13:** Validation matrix: NaN, magnitude, tick window, rate limit (N > limit drops at least N-limit), InputSeq selection (tied → LKI fallback), TargetTickFloor enforcement, pre-Welcome input drop
 - [ ] **T0.13a:** Floor enforcement drop and recovery test: snapshot loss → inputs dropped → recovery within bounded ticks
-- [ ] **T0.14:** Disconnect handling: complete current tick, persist artifact with end_reason="disconnect", clean shutdown
-- [ ] **T0.15:** Match termination: complete match reaches match_duration_ticks, artifact persisted with end_reason="complete"
-- [ ] **T0.16:** Connection timeout: server aborts if < 2 sessions within connect_timeout_ms, non-zero exit code, no artifact
+- [ ] **T0.14:** Disconnect handling: session removed, that player's Character freezes in place, match continues unaffected for every other session
+- [ ] **T0.15:** Match termination: complete match reaches match_duration_ticks, artifact persisted with end_reason="complete" (the only end_reason)
+- [ ] **T0.16:** Connection timeout: server aborts if 0 sessions connect within connect_timeout_ms, non-zero exit code, no artifact
 - [ ] **T0.17:** PlayerId non-assumption: `--test-mode --test-player-ids 17,99` produces correct movement and replay verification
 - [ ] **T0.18:** Floor coherency: server broadcasts byte-identical SnapshotProto to all sessions per tick
 - [ ] **T0.19:** Schema identity CI gate: wire crate is shared dependency of both server and client

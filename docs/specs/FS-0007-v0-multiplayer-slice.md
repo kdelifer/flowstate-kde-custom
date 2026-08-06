@@ -297,101 +297,115 @@ Parameter values referenced from [v0-parameters.md](../networking/v0-parameters.
 
 **Test Harness Note (Normative):** In tests, the server tick loop MUST be runnable in 'manual step' mode without wall-clock pacing (e.g., explicit `server.tick()` calls). CI MUST NOT sleep for match duration.
 
+**Revision note (session model):** the pseudocode below reflects the current
+N-session model, superseding the original v0 draft's "exactly 2 sessions,
+accepted together, ending together" design. Sessions now join and leave
+independently, at any time; a session disconnecting freezes that player's
+Character (LastKnownIntent reset to zero) for everyone else but never ends
+the match.
+
 ```
-// Wait for two sessions with timeout; then send ServerWelcome + JoinBaseline
-wait for two client connections (timeout: connect_timeout_ms)
-if timeout expires before 2 sessions connect:
+// Wait for the FIRST session with timeout; the world begins ticking once at
+// least one session has connected -- unlike the original v0 draft, this
+// does NOT wait for a second session.
+wait for the first client connection (timeout: connect_timeout_ms)
+if timeout expires before any session connects:
     log timeout event
     exit with error status
     // No ReplayArtifact written for pre-match timeout
-if any session disconnects before 2 sessions connected:
-    // Abort on any pre-match disconnect (v0 simplicity)
-    log pre-match disconnect
-    exit with error status
-    // No ReplayArtifact written
+
 world = World::new(seed, tick_rate_hz)  // tick_rate_hz from v0-parameters.md
                                          // seed sourcing: see Seed Sourcing section below
 
-// NORMATIVE: Spawn characters in entity_spawn_order (assigned player IDs)
-// Normal mode: entity_spawn_order = [player_id_of_first_session, player_id_of_second_session] (v0 default values: 0, 1; connection order)
-// Test-mode: entity_spawn_order = [id1, id2] from --test-player-ids (e.g., [17, 99])
-for each player_id in entity_spawn_order:
+// NORMATIVE: Sessions are accepted in connection order, at any time --
+// before or after ticking has started, with no fixed roster or single
+// "match start" barrier. Each accepted session is spawned and welcomed
+// individually, reflecting the world's CURRENT tick/state, not a shared
+// tick-0 snapshot.
+// Normal mode: player_id = a monotonically increasing counter, never
+// reused across the server's lifetime (0, 1, 2, ... in connection order;
+// disconnecting and later reconnecting does NOT reuse a lower id -- reuse
+// would risk colliding with a still-connected session).
+// Test-mode: player_id = the next entry from --test-player-ids, consumed
+// in connection order (e.g., [17, 99, ...]).
+on each accepted session:
     entity_id = world.spawn_character(player_id)
     record (player_id, entity_id) in player_entity_mapping
-// entity_spawn_order and player_entity_mapping recorded in ReplayArtifact
-
-initial_tick = world.tick()  // v0 NORMATIVE: World::new() creates World at tick 0, so initial_tick = 0
-target_tick_floor = initial_tick + input_lead_ticks  // input_lead_ticks from v0-parameters.md
-
-// Initialize floor state BEFORE ServerWelcome (pre-Welcome inputs will be dropped)
-for each session: last_emitted_target_tick_floor_for_session = target_tick_floor
-
-send ServerWelcome (target_tick_floor, tick_rate_hz, player_id, controlled_entity_id) to each client
-send JoinBaseline (world.baseline()) to both clients
+    target_tick_floor = world.tick() + input_lead_ticks  // reflects the
+                                                          // world's current
+                                                          // tick, not tick 0
+    last_emitted_target_tick_floor_for_session = target_tick_floor
+    send ServerWelcome (target_tick_floor, tick_rate_hz, player_id, controlled_entity_id) to this session only
+    send JoinBaseline (world.baseline()) to this session only
+// entity_spawn_order and player_entity_mapping recorded in ReplayArtifact;
+// the ReplayArtifact's initial_baseline is captured on the first tick
+// processed below, reflecting whichever sessions had joined by then.
 
 // Pre-Welcome Input Handling (Normative): Server Edge MUST discard immediately
-// without buffering any InputCmdProto received before ServerWelcome is sent to that
-// session. Rationale: PlayerId binding occurs at Welcome; inputs cannot be validated
-// or associated with a player before that point. Immediate discard avoids edge-case
-// state (queued-but-not-validated) and matches typical connection protocol patterns
-// (nothing accepted until handshake complete).
+// without buffering any InputCmdProto received before ServerWelcome is sent to
+// that session. Rationale: PlayerId binding occurs at Welcome; inputs cannot be
+// validated or associated with a player before that point. In practice, accept
+// and welcome happen synchronously, before any input from that session could
+// physically arrive, so this reduces to ordinary unknown-session handling.
 
 loop (paced at tick_rate_hz):
     current_tick = world.tick()  // NORMATIVE: current_tick is the pre-step tick being processed (tick T).
                                   // After world.advance(T, inputs), world.tick() returns T+1.
-    
-    // v0 Match Invariant: Authoritative player roster is fixed at match start (two players).
-    // AppliedInput MUST be produced for both players on every processed tick,
-    // even if one session is silent (LastKnownIntent fallback).
-    
-    // Check match termination (see v0-parameters.md)
-    // For match_duration_ticks=N starting at initial_tick, server processes ticks
-    // [initial_tick, initial_tick+N) and exits with checkpoint_tick = initial_tick+N.
-    if current_tick >= initial_tick + match_duration_ticks:
+
+    // v0 roster is dynamic: sessions may join or leave at any tick, not
+    // fixed at a single match start. AppliedInput MUST be produced for
+    // every CURRENTLY-spawned player on every processed tick (from the
+    // buffer, or LastKnownIntent fallback for a silent or disconnected
+    // player).
+
+    // Check match termination (see v0-parameters.md). Duration-based only
+    // -- a session disconnecting does NOT end the match. Server processes
+    // ticks [0, match_duration_ticks) and exits with
+    // checkpoint_tick = match_duration_ticks.
+    if current_tick >= match_duration_ticks:
         trigger match end (end_reason="complete")
         break
-    
-    // Buffer incoming inputs with validation + InputSeq selection
+
+    // Accept any newly-connected sessions this tick (see "on each accepted
+    // session" above -- now running continuously, not just once), buffer
+    // incoming inputs with validation + InputSeq selection.
+    server_edge.accept_new_sessions()
     server_edge.receive_and_buffer_inputs()
-    
-    // Produce AppliedInput per player (from buffer or LastKnownIntent)
+
+    // Process any disconnects. NORMATIVE (v0 ENet): 'disconnect detected'
+    // means the server received an ENet disconnect event for the peer
+    // (ENET_EVENT_TYPE_DISCONNECT) or the library reported a timeout/
+    // disconnect condition as a disconnect event. On disconnect: remove
+    // the session, and reset that player's LastKnownIntent to zero
+    // (freeze their Character in place for everyone still connected)
+    // rather than despawning them or ending the match.
+    server_edge.process_disconnects()
+
+    // Produce AppliedInput per currently-spawned player (from buffer or
+    // LastKnownIntent)
     applied_inputs = []
-    for each player:
+    for each currently-spawned player:
         if input_buffer[player][current_tick] exists:
             applied_inputs.append(buffer entry)
             update current_intent[player]
         else:
             applied_inputs.append(LastKnownIntent fallback)
-    
+
     // Record for replay, convert to StepInput, advance
     replay_artifact.inputs.extend(sort applied_inputs by player_id ascending)
     step_inputs = convert applied_inputs to StepInput (sorted by player_id ascending)
     snapshot = world.advance(current_tick, step_inputs)
-    
+
     // NORMATIVE: Compute TargetTickFloor AFTER advance using post-step tick (ADR-0006)
     target_tick_floor = world.tick() + input_lead_ticks  // = (current_tick + 1) + input_lead_ticks
-    for each session: last_emitted_target_tick_floor_for_session = target_tick_floor
-    
-    // Check for disconnects (after advance, before termination decision)
-    // NORMATIVE (v0 ENet): 'disconnect detected' means the server received an ENet
-    // disconnect event for the peer (ENET_EVENT_TYPE_DISCONNECT) or the library
-    // reported a timeout/disconnect condition as a disconnect event. If using a
-    // wrapper abstraction, the wrapper's disconnect event enum is authoritative.
-    disconnect_detected = any session disconnected
-    
-    // Broadcast to all currently connected sessions; send failure to disconnected peer is ignored
+    for each currently-connected session: last_emitted_target_tick_floor_for_session = target_tick_floor
+
+    // Broadcast to all currently connected sessions; send failure to a
+    // disconnected peer is ignored
     broadcast(snapshot, target_tick_floor)
-    
-    // Terminate on disconnect after completing this tick
-    if disconnect_detected:
-        trigger match end (end_reason="disconnect")
-        break
 
 on match end:
     // Complete current tick before ending (no mid-tick termination)
-    if end_reason == "disconnect":
-        // Best-effort final snapshot already broadcast in loop above
-        pass  // No additional broadcast
     replay_artifact.final_digest = world.state_digest()
     replay_artifact.checkpoint_tick = world.tick()
     write replay artifact to replays/{match_id}.replay  // MUST
@@ -506,9 +520,9 @@ For v0, RNG seed acquisition is defined as follows:
 - [ ] **T0.12a:** Non-canonical AppliedInput storage order test (fault injection): artificially violate producer canonical-order requirement, verify verifier robustness (canonicalizes successfully; dev warning allowed)
 - [ ] **T0.13:** Validation matrix: NaN, magnitude, tick window, rate limit (testability: N > limit drops at least N-limit), InputSeq selection (drop tied InputSeq → LKI fallback), TargetTickFloor enforcement, pre-Welcome input drop
 - [ ] **T0.13a:** Floor enforcement drop and recovery test: Simulate snapshot packet loss for N ticks; verify inputs below last_emitted_target_tick_floor are dropped (correctness-over-smoothness v0 tradeoff). Then deliver one SnapshotProto containing the new floor; verify client targets >= new floor and movement resumes within bounded ticks. *Rationale: Proves system recovers from floor staleness, not stuck indefinitely.*
-- [ ] **T0.14:** Disconnect handling: complete current tick, persist artifact with end_reason="disconnect", clean shutdown
-- [ ] **T0.15:** Match termination: complete match reaches match_duration_ticks, artifact persisted with end_reason="complete"
-- [ ] **T0.16:** Connection timeout: server aborts if < 2 sessions connect within connect_timeout_ms, exits with non-zero exit code (no artifact); CI MUST assert exit code and log token for deterministic test verification
+- [ ] **T0.14:** Disconnect handling: session removed, that player's LastKnownIntent reset to zero (Character freezes in place), match continues unaffected for every other session -- a disconnect never ends the match or shuts down the server
+- [ ] **T0.15:** Match termination: complete match reaches match_duration_ticks, artifact persisted with end_reason="complete" (the only end_reason -- disconnects no longer produce one)
+- [ ] **T0.16:** Connection timeout: server aborts if no session connects within connect_timeout_ms (threshold is "at least 1", not "exactly 2"), exits with non-zero exit code (no artifact); CI MUST assert exit code and log token for deterministic test verification
 - [ ] **T0.17:** Simulation Core PlayerId Non-assumption: In `--test-mode` with `--test-player-ids 17,99`, match MUST produce correct movement behavior and replay verification for both players; Simulation Core MUST NOT assume PlayerIds are {0,1}
 - [ ] **T0.18:** Floor coherency server-side broadcast: For any given server tick, the server MUST broadcast byte-identical `SnapshotProto` payload to all connected sessions (assert server-side before send). *Rationale: Directly tests normative floor coherency and v0 byte-identical snapshot requirement; aligned with unreliable transport (cannot guarantee client receipt).*
 - [ ] **T0.19:** Schema identity CI gate: Client and server protobuf message types MUST be defined in a single shared crate/workspace package (e.g., `flowstate_wire`) that is a direct dependency of both binaries. Tier-0/CI MUST verify this by building both binaries and failing if either does not depend on the same package ID for the wire crate (same name + version + source). *Rationale: Prevents accidental divergence of client/server message definitions within same-repo v0 scope by enforcing single canonical definition.*
@@ -536,7 +550,7 @@ Maps to AC-0001 sub-criteria:
 - [ ] **AC-0001.1:** Two clients connect, handshake, receive Baseline, remain synchronized (v0 definition: clients' rendered state equals last received authoritative snapshot for that tick; no client-side prediction required)
 - [ ] **AC-0001.2:** WASD movement works; LastKnownIntent for missing inputs; TargetTickFloor-based targeting; both clients receive snapshots (v0: one per tick)
 - [ ] **AC-0001.3:** Replay verification passes (baseline + final digest); Simulation Core has no I/O; tick_rate_hz fixed at construction; advance() takes explicit tick + StepInput
-- [ ] **AC-0001.4:** Validation per v0-parameters.md; InputSeq selection per Validation Rules (greatest-wins; equal is protocol violation); future inputs buffered correctly; player_id bound to session (INV-0003); disconnect → complete tick → persist artifact → shutdown; connection timeout aborts cleanly
+- [ ] **AC-0001.4:** Validation per v0-parameters.md; InputSeq selection per Validation Rules (greatest-wins; equal is protocol violation); future inputs buffered correctly; player_id bound to session (INV-0003); disconnect → session removed, that player's Character freezes in place, match continues for every other session (no shutdown, no artifact persisted from the disconnect itself); connection timeout (no session within connect_timeout_ms) aborts cleanly
 - [ ] **AC-0001.5:** ReplayArtifact produced with all fields; reproduces outcome on same build/platform
 
 ## Non-Goals

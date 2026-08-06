@@ -107,7 +107,12 @@ fn test_two_clients_connect_to_server_subprocess() {
     assert_eq!(client_a.welcome().tick_rate_hz, 60);
     assert_eq!(client_a.tick_floor(), 1);
 
-    // T0.2: JoinBaseline delivered identically to both.
+    // T0.2: each client's JoinBaseline reflects world state at the moment
+    // of its own accept, not a shared match-start snapshot -- under the
+    // N-session model, whichever client connects first sees only itself
+    // (thread connect order is not deterministic). Each baseline must at
+    // minimum contain that client's own controlled entity; convergence to
+    // both entities is verified below once live snapshots arrive.
     let baseline_a = client_a
         .recv_baseline(Duration::from_secs(5))
         .expect("baseline a")
@@ -117,10 +122,18 @@ fn test_two_clients_connect_to_server_subprocess() {
         .expect("baseline b")
         .clone();
     assert_eq!(baseline_a.tick, 0);
-    assert_eq!(baseline_a.entities.len(), 2);
-    assert_eq!(
-        baseline_a, baseline_b,
-        "both clients must receive an identical baseline"
+    assert_eq!(baseline_b.tick, 0);
+    assert!(
+        baseline_a
+            .entities
+            .iter()
+            .any(|e| e.entity_id == client_a.welcome().controlled_entity_id)
+    );
+    assert!(
+        baseline_b
+            .entities
+            .iter()
+            .any(|e| e.entity_id == client_b.welcome().controlled_entity_id)
     );
 
     // T0.18-ish: live SnapshotProto broadcasts actually cross the process
@@ -139,6 +152,14 @@ fn test_two_clients_connect_to_server_subprocess() {
         seen_tick.expect("expected at least one live SnapshotProto from the subprocess");
     assert!(seen_tick >= 1);
     assert_eq!(client_a.tick_floor(), seen_tick + 1);
+    // By the time a live snapshot arrives, both sessions have been folded
+    // into the broadcast state, regardless of which client's own baseline
+    // arrived first with only 1 entity.
+    assert_eq!(
+        client_a.snapshot().expect("snapshot").entities.len(),
+        2,
+        "both sessions should be reflected in live snapshots"
+    );
 
     // `_guard` drops here: kills the subprocess rather than waiting out the
     // full default match duration.

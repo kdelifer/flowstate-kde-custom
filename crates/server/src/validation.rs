@@ -50,9 +50,10 @@ pub enum ValidationResult {
     DroppedRateLimit,
     /// Dropped: InputSeq tied for this (player, tick).
     DroppedInputSeqTie,
-    /// Dropped: Received before ServerWelcome.
-    DroppedPreWelcome,
-    /// Dropped: Unknown session.
+    /// Dropped: unknown session -- covers both a session that was never
+    /// accepted and one whose welcome hasn't landed yet, since accept and
+    /// welcome now happen synchronously in the same tick_loop iteration
+    /// (no window exists where a session is known but not yet welcomed).
     DroppedUnknownSession,
 }
 

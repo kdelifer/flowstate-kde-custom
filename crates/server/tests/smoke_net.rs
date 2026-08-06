@@ -20,6 +20,7 @@ struct ClientResult {
     baseline: JoinBaseline,
     snapshots_seen: usize,
     last_tick: u64,
+    last_snapshot_entity_count: usize,
 }
 
 fn run_client(server_addr: SocketAddr) -> ClientResult {
@@ -42,6 +43,7 @@ fn run_client(server_addr: SocketAddr) -> ClientResult {
     let mut baseline: Option<JoinBaseline> = None;
     let mut snapshots_seen = 0usize;
     let mut last_tick = 0u64;
+    let mut last_snapshot_entity_count = 0usize;
 
     while Instant::now() < deadline {
         while let Some(event) = host.service().expect("client service") {
@@ -68,6 +70,7 @@ fn run_client(server_addr: SocketAddr) -> ClientResult {
                     {
                         snapshots_seen += 1;
                         last_tick = snapshot.tick;
+                        last_snapshot_entity_count = snapshot.entities.len();
                     }
                 }
                 enet::Event::Disconnect { .. } => {}
@@ -85,6 +88,7 @@ fn run_client(server_addr: SocketAddr) -> ClientResult {
         baseline: baseline.expect("did not receive JoinBaseline"),
         snapshots_seen,
         last_tick,
+        last_snapshot_entity_count,
     }
 }
 
@@ -119,18 +123,38 @@ fn test_two_client_handshake_over_real_enet() {
     assert!(result_b.welcome.controlled_entity_id > 0);
     assert_eq!(result_a.welcome.tick_rate_hz, 60);
 
-    // T0.2: baseline delivered at tick 0 with both characters spawned.
+    // T0.2: each client's baseline reflects world state at the moment of
+    // *its own* accept, not a shared match-start snapshot -- under the
+    // N-session model, whichever client connects first sees only itself
+    // (connect order between two independently-spawned threads is not
+    // deterministic, so either client may be "first"). Each baseline must
+    // at minimum contain that client's own controlled entity.
     assert_eq!(result_a.baseline.tick, 0);
-    assert_eq!(result_a.baseline.entities.len(), 2);
+    assert_eq!(result_b.baseline.tick, 0);
     assert!(
-        result_a.baseline == result_b.baseline,
-        "both clients must receive an identical baseline"
+        result_a
+            .baseline
+            .entities
+            .iter()
+            .any(|e| e.entity_id == result_a.welcome.controlled_entity_id)
+    );
+    assert!(
+        result_b
+            .baseline
+            .entities
+            .iter()
+            .any(|e| e.entity_id == result_b.welcome.controlled_entity_id)
     );
 
-    // T0.18: both clients observed live snapshot broadcasts advancing.
+    // T0.18: both clients observed live snapshot broadcasts advancing, and
+    // by the time each stopped watching, both sessions had been folded into
+    // the broadcast state (2 entities), regardless of which client's own
+    // baseline arrived first with only 1.
     assert!(result_a.snapshots_seen >= 3);
     assert!(result_b.snapshots_seen >= 3);
     assert!(result_a.last_tick >= 1);
+    assert_eq!(result_a.last_snapshot_entity_count, 2);
+    assert_eq!(result_b.last_snapshot_entity_count, 2);
 
     // LOOP-001/SRV-023: match ran to completion and was recorded.
     assert_eq!(artifact.end_reason, "complete");

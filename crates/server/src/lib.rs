@@ -33,7 +33,7 @@ pub mod validation;
 use std::collections::HashMap;
 
 use flowstate_replay::{AppliedInput, BuildFingerprintData, ReplayConfig, ReplayRecorder};
-use flowstate_sim::{Baseline, PlayerId, Snapshot, StepInput, Tick, World};
+use flowstate_sim::{PlayerId, Snapshot, StepInput, Tick, World};
 use flowstate_wire::{InputCmdProto, JoinBaseline, ReplayArtifact, ServerWelcome, SnapshotProto};
 use input_buffer::InputBuffer;
 use session::{Session, SessionId};
@@ -61,22 +61,29 @@ pub const MATCH_DURATION_TICKS: u64 = 3600;
 /// Connection timeout in milliseconds.
 pub const CONNECT_TIMEOUT_MS: u64 = 30000;
 
+/// Default cap on concurrent sessions (transport-level ENet peer limit).
+/// Generous for testing with any number of clients; well under `PlayerId`'s
+/// `u8` range.
+pub const DEFAULT_MAX_SESSIONS: usize = 16;
+
 // ============================================================================
 // Match End Reason
 // ============================================================================
 
 /// Reason for match termination.
+///
+/// Disconnects no longer end the match (a session dropping does not affect
+/// other connected sessions), so `Complete` (duration reached) is currently
+/// the only way a match ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EndReason {
     Complete,
-    Disconnect,
 }
 
 impl EndReason {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Complete => "complete",
-            Self::Disconnect => "disconnect",
         }
     }
 }
@@ -95,8 +102,13 @@ pub struct ServerConfig {
     pub input_rate_limit_per_sec: u32,
     pub match_duration_ticks: u64,
     pub connect_timeout_ms: u64,
+    /// Cap on concurrent sessions (drives the ENet transport's peer limit).
+    pub max_sessions: usize,
     pub test_mode: bool,
-    pub test_player_ids: Option<(PlayerId, PlayerId)>,
+    /// Pre-assigned PlayerIds, consumed in connection order. Exhausting the
+    /// list (more accepts than configured IDs) panics -- test-only usage
+    /// where the caller controls how many accepts happen.
+    pub test_player_ids: Option<Vec<PlayerId>>,
 }
 
 impl Default for ServerConfig {
@@ -109,6 +121,7 @@ impl Default for ServerConfig {
             input_rate_limit_per_sec: INPUT_RATE_LIMIT_PER_SEC,
             match_duration_ticks: MATCH_DURATION_TICKS,
             connect_timeout_ms: CONNECT_TIMEOUT_MS,
+            max_sessions: DEFAULT_MAX_SESSIONS,
             test_mode: false,
             test_player_ids: None,
         }
@@ -121,6 +134,11 @@ pub struct Server {
     world: World,
     sessions: HashMap<SessionId, Session>,
     next_session_id: SessionId,
+    /// Monotonically increasing, never reused across the server's lifetime
+    /// -- reusing `sessions.len()`-based assignment would collide once
+    /// sessions can disconnect and new ones join later. In test_mode, used
+    /// as an ordinal index into `test_player_ids` instead of an ID value.
+    next_player_id: PlayerId,
     /// PlayerId → SessionId mapping
     player_sessions: HashMap<PlayerId, SessionId>,
     /// SessionId → PlayerId mapping (for convenience)
@@ -137,10 +155,9 @@ pub struct Server {
     entity_spawn_order: Vec<PlayerId>,
     /// Player → Entity mapping
     player_entity_mapping: HashMap<PlayerId, flowstate_sim::EntityId>,
-    /// Initial tick (set after match starts)
-    initial_tick: Tick,
-    /// Match started flag
-    match_started: bool,
+    /// Whether the replay's initial baseline has been recorded yet (happens
+    /// lazily on the first `step()` call).
+    baseline_recorded: bool,
     /// Build fingerprint
     build_fingerprint: Option<BuildFingerprintData>,
 }
@@ -159,16 +176,14 @@ impl Server {
             tick_rate_hz: config.tick_rate_hz,
             rng_algorithm: "none".to_string(),
             test_mode: config.test_mode,
-            test_player_ids: config
-                .test_player_ids
-                .map(|(a, b)| vec![a, b])
-                .unwrap_or_default(),
+            test_player_ids: config.test_player_ids.clone().unwrap_or_default(),
         };
 
         Self {
             world: World::new(config.seed, config.tick_rate_hz),
             sessions: HashMap::new(),
             next_session_id: 1,
+            next_player_id: 0,
             player_sessions: HashMap::new(),
             session_players: HashMap::new(),
             input_buffer: InputBuffer::new(validation_config),
@@ -177,8 +192,7 @@ impl Server {
             replay_recorder: ReplayRecorder::new(replay_config),
             entity_spawn_order: Vec::new(),
             player_entity_mapping: HashMap::new(),
-            initial_tick: 0,
-            match_started: false,
+            baseline_recorded: false,
             build_fingerprint: None,
             config,
         }
@@ -200,34 +214,42 @@ impl Server {
         self.sessions.len()
     }
 
-    /// Check if server is ready to start (enough sessions connected).
-    /// Used for external timeout enforcement (T0.16).
-    pub fn is_ready_to_start(&self) -> bool {
-        self.sessions.len() >= 2
-    }
-
-    /// Accept a new session (client connected).
+    /// Accept a new session (client connected). Callable at any time --
+    /// before or after other sessions exist, before or after the world has
+    /// started ticking. Each accepted session must be individually welcomed
+    /// via [`Server::welcome_for`] (no more single-shot `start_match`
+    /// barrier).
     /// Returns (session_id, assigned_player_id, controlled_entity_id).
     ///
     /// # Panics
-    /// If more than 2 sessions try to connect (v0 limit).
+    /// If `config.max_sessions` is exceeded. In practice this should not
+    /// happen: the ENet transport's peer limit (driven by the same config)
+    /// already rejects connections beyond that cap before a ClientHello
+    /// could ever reach this call.
     pub fn accept_session(&mut self) -> (SessionId, PlayerId, flowstate_sim::EntityId) {
-        assert!(self.sessions.len() < 2, "v0: Only 2 sessions allowed");
         assert!(
-            !self.match_started,
-            "Cannot accept sessions after match start"
+            self.sessions.len() < self.config.max_sessions,
+            "max_sessions ({}) exceeded",
+            self.config.max_sessions
         );
 
         let session_id = self.next_session_id;
         self.next_session_id += 1;
 
-        // Assign player ID
-        let player_id = if let Some((id1, id2)) = self.config.test_player_ids {
-            // Test mode: use configured IDs
-            if self.sessions.is_empty() { id1 } else { id2 }
+        // Assign player ID: monotonic ordinal, never reused (see
+        // next_player_id's doc comment). In test_mode this ordinal indexes
+        // into the pre-configured ID list instead of being used directly.
+        let ordinal = self.next_player_id;
+        self.next_player_id += 1;
+        let player_id = if let Some(test_ids) = &self.config.test_player_ids {
+            *test_ids.get(ordinal as usize).unwrap_or_else(|| {
+                panic!(
+                    "test_player_ids exhausted: accept #{ordinal} requested but only {} configured",
+                    test_ids.len()
+                )
+            })
         } else {
-            // Normal mode: 0 for first, 1 for second
-            self.sessions.len() as PlayerId
+            ordinal
         };
 
         // Spawn character
@@ -250,76 +272,53 @@ impl Server {
         (session_id, player_id, entity_id)
     }
 
-    /// Start the match (after 2 clients connected).
-    /// Returns the initial baseline and ServerWelcome data for each session.
-    pub fn start_match(&mut self) -> (Baseline, Vec<(SessionId, ServerWelcome)>) {
-        assert_eq!(
-            self.sessions.len(),
-            2,
-            "Need exactly 2 sessions to start match"
-        );
-        assert!(!self.match_started, "Match already started");
-
-        self.match_started = true;
-        self.initial_tick = self.world.tick();
-
-        // Record baseline
-        let baseline = self.world.baseline();
-        self.replay_recorder.record_baseline(baseline.clone());
-
-        // Compute initial target tick floor
-        let target_tick_floor = self.initial_tick + self.config.input_lead_ticks;
-
-        // Initialize floor state for all sessions
-        for &session_id in self.sessions.keys() {
-            self.last_emitted_floor
-                .insert(session_id, target_tick_floor);
-        }
-
-        // Create ServerWelcome for each session
-        let welcomes: Vec<_> = self
+    /// Compute and record the `ServerWelcome` for a session immediately
+    /// after [`Server::accept_session`]. Reflects the world's *current*
+    /// tick/state at the moment of the call, not a fixed match-start
+    /// snapshot -- a session accepted after the world has already advanced
+    /// gets a floor computed from wherever the world currently is.
+    ///
+    /// # Panics
+    /// If `session_id` was not returned by a prior `accept_session` call.
+    pub fn welcome_for(&mut self, session_id: SessionId) -> ServerWelcome {
+        let session = self
             .sessions
-            .values()
-            .map(|session| {
-                let welcome = ServerWelcome {
-                    target_tick_floor,
-                    tick_rate_hz: self.config.tick_rate_hz,
-                    player_id: u32::from(session.player_id),
-                    controlled_entity_id: session.controlled_entity_id,
-                };
-                (session.id, welcome)
-            })
-            .collect();
+            .get(&session_id)
+            .expect("welcome_for: unknown session_id");
+        let target_tick_floor = self.world.tick() + self.config.input_lead_ticks;
+        self.last_emitted_floor
+            .insert(session_id, target_tick_floor);
 
-        (baseline, welcomes)
+        ServerWelcome {
+            target_tick_floor,
+            tick_rate_hz: self.config.tick_rate_hz,
+            player_id: u32::from(session.player_id),
+            controlled_entity_id: session.controlled_entity_id,
+        }
     }
 
-    /// Check if match should end.
+    /// Check if match should end. Duration-based only -- a session
+    /// disconnecting no longer ends the match for everyone else.
     pub fn should_end_match(&self) -> Option<EndReason> {
-        if !self.match_started {
-            return None;
+        if self.world.tick() >= self.config.match_duration_ticks {
+            Some(EndReason::Complete)
+        } else {
+            None
         }
-
-        // Check duration
-        if self.world.tick() >= self.initial_tick + self.config.match_duration_ticks {
-            return Some(EndReason::Complete);
-        }
-
-        None
     }
 
-    /// Handle session disconnect.
+    /// Handle session disconnect. Does NOT end the match. The departed
+    /// player's Character freezes in place: their last known intent resets
+    /// to zero, so subsequent ticks stop applying their last real input
+    /// (which would otherwise have them coast forever) instead of
+    /// despawning them.
     pub fn disconnect_session(&mut self, session_id: SessionId) {
         if let Some(session) = self.sessions.remove(&session_id) {
             self.player_sessions.remove(&session.player_id);
             self.session_players.remove(&session_id);
+            self.last_emitted_floor.remove(&session_id);
+            self.last_known_intent.insert(session.player_id, [0.0, 0.0]);
         }
-    }
-
-    /// Check if any session has disconnected.
-    pub fn has_disconnect(&self) -> bool {
-        // In v0, we check if we started with 2 and now have fewer
-        self.match_started && self.sessions.len() < 2
     }
 
     /// Receive and buffer an input from a client.
@@ -329,12 +328,10 @@ impl Server {
         session_id: SessionId,
         input: InputCmdProto,
     ) -> ValidationResult {
-        // Pre-Welcome input drop
-        if !self.match_started {
-            return ValidationResult::DroppedPreWelcome;
-        }
-
-        // Get player_id for this session
+        // Every session in `session_players` has already been synchronously
+        // welcomed (accept + welcome_for happen before any input could
+        // possibly arrive over the network), so this lookup already covers
+        // "not accepted yet" -- no separate pre-welcome state to track.
         let Some(&player_id) = self.session_players.get(&session_id) else {
             return ValidationResult::DroppedUnknownSession;
         };
@@ -361,6 +358,15 @@ impl Server {
     ///
     /// The serialized bytes are identical for all sessions (T0.18).
     pub fn step(&mut self) -> (Snapshot, Tick, Vec<u8>) {
+        // Record the replay's initial baseline lazily, on the first step
+        // ever taken -- captures whatever sessions have joined by the
+        // moment ticking begins, mirroring the old start_match()-recorded
+        // timing without requiring a fixed number of sessions upfront.
+        if !self.baseline_recorded {
+            self.baseline_recorded = true;
+            self.replay_recorder.record_baseline(self.world.baseline());
+        }
+
         let current_tick = self.world.tick();
 
         // Produce AppliedInput per player
@@ -486,31 +492,22 @@ mod tests {
         assert_eq!(player1, 0);
         assert!(entity1 > 0);
         assert_eq!(server.session_count(), 1);
+        let welcome1 = server.welcome_for(session1);
+        assert_eq!(welcome1.target_tick_floor, INPUT_LEAD_TICKS);
+        assert_eq!(welcome1.tick_rate_hz, TICK_RATE_HZ);
+        assert_eq!(welcome1.player_id, 0);
+        assert_eq!(welcome1.controlled_entity_id, entity1);
 
         // Accept second session
-        let (_session2, player2, entity2) = server.accept_session();
+        let (session2, player2, entity2) = server.accept_session();
         assert_eq!(player2, 1);
         assert!(entity2 > 0);
         assert_ne!(entity1, entity2);
         assert_eq!(server.session_count(), 2);
-
-        // Start match
-        let (baseline, welcomes) = server.start_match();
-        assert_eq!(baseline.tick, 0);
-        assert_eq!(welcomes.len(), 2);
-
-        // Verify ServerWelcome contents
-        for (sid, welcome) in &welcomes {
-            assert_eq!(welcome.target_tick_floor, INPUT_LEAD_TICKS);
-            assert_eq!(welcome.tick_rate_hz, TICK_RATE_HZ);
-            if *sid == session1 {
-                assert_eq!(welcome.player_id, 0);
-                assert_eq!(welcome.controlled_entity_id, entity1);
-            } else {
-                assert_eq!(welcome.player_id, 1);
-                assert_eq!(welcome.controlled_entity_id, entity2);
-            }
-        }
+        let welcome2 = server.welcome_for(session2);
+        assert_eq!(welcome2.target_tick_floor, INPUT_LEAD_TICKS);
+        assert_eq!(welcome2.player_id, 1);
+        assert_eq!(welcome2.controlled_entity_id, entity2);
     }
 
     /// T0.2: JoinBaseline delivers initial Baseline.
@@ -520,7 +517,7 @@ mod tests {
         server.accept_session();
         server.accept_session();
 
-        let (baseline, _) = server.start_match();
+        let baseline = server.baseline_proto();
 
         // Baseline should have 2 entities at tick 0
         assert_eq!(baseline.tick, 0);
@@ -534,7 +531,6 @@ mod tests {
         let mut server = Server::new(ServerConfig::default());
         server.accept_session();
         server.accept_session();
-        server.start_match();
 
         // Step once
         let (snapshot, floor, _) = server.step();
@@ -550,19 +546,97 @@ mod tests {
         assert_eq!(floor2, 2 + INPUT_LEAD_TICKS);
     }
 
-    /// T0.14: Disconnect handling.
+    /// T0.14: Disconnect handling -- does NOT end the match, and freezes
+    /// the departed player's Character (last known intent resets to zero)
+    /// rather than letting it coast on stale intent.
     #[test]
     fn test_t0_14_disconnect_handling() {
         let mut server = Server::new(ServerConfig::default());
-        let (session1, _, _) = server.accept_session();
+        let (session1, _player1, entity1) = server.accept_session();
         server.accept_session();
-        server.start_match();
+        server.welcome_for(session1);
 
-        // Simulate disconnect
+        server.receive_input(
+            session1,
+            InputCmdProto {
+                tick: INPUT_LEAD_TICKS,
+                input_seq: 1,
+                move_dir: vec![1.0, 0.0],
+            },
+        );
+        // Tick 0 is always a forced no-op (ADR-0006 startup behavior: the
+        // initial floor is input_lead_ticks=1, so no client can target tick
+        // 0) -- the buffered input above targets tick 1, so it only takes
+        // effect on the *second* step.
+        server.step();
+        let (snapshot_before, _, _) = server.step();
+        let pos_before = snapshot_before
+            .entities
+            .iter()
+            .find(|e| e.entity_id == entity1)
+            .unwrap()
+            .position;
+        assert_ne!(pos_before, [0.0, 0.0], "sanity: player1 should have moved");
+
         server.disconnect_session(session1);
-
-        assert!(server.has_disconnect());
         assert_eq!(server.session_count(), 1);
+        assert_eq!(
+            server.should_end_match(),
+            None,
+            "disconnect must not end the match"
+        );
+
+        let (snapshot_after, _, _) = server.step();
+        let pos_after = snapshot_after
+            .entities
+            .iter()
+            .find(|e| e.entity_id == entity1)
+            .unwrap()
+            .position;
+        assert_eq!(
+            pos_after, pos_before,
+            "disconnected player's Character must freeze in place"
+        );
+    }
+
+    /// PlayerIds must never be reused, even after a disconnect frees up a
+    /// "slot" -- otherwise a new joiner could collide with a still-connected
+    /// session's PlayerId.
+    #[test]
+    fn test_player_id_not_reused_after_disconnect() {
+        let mut server = Server::new(ServerConfig::default());
+        let (session0, player0, _) = server.accept_session();
+        let (_, player1, _) = server.accept_session();
+        assert_eq!((player0, player1), (0, 1));
+
+        server.disconnect_session(session0);
+        let (_, player2, _) = server.accept_session();
+        assert_eq!(player2, 2);
+    }
+
+    /// A single session is sufficient to start ticking and receive
+    /// snapshots -- no second session is required.
+    #[test]
+    fn test_single_session_can_start_and_step() {
+        let mut server = Server::new(ServerConfig::default());
+        let (session1, _, entity1) = server.accept_session();
+        let welcome = server.welcome_for(session1);
+        assert_eq!(welcome.target_tick_floor, INPUT_LEAD_TICKS);
+
+        let (snapshot, _, _) = server.step();
+        assert_eq!(snapshot.entities.len(), 1);
+        assert_eq!(snapshot.entities[0].entity_id, entity1);
+    }
+
+    /// Sessions beyond the old v0 cap of 2 are supported.
+    #[test]
+    fn test_accept_session_supports_more_than_two() {
+        let mut server = Server::new(ServerConfig::default());
+        let (_, player0, _) = server.accept_session();
+        let (_, player1, _) = server.accept_session();
+        let (_, player2, _) = server.accept_session();
+        assert_eq!([player0, player1, player2], [0, 1, 2]);
+        assert_eq!(server.session_count(), 3);
     }
 
     /// T0.15: Match termination.
@@ -575,7 +649,6 @@ mod tests {
         let mut server = Server::new(config);
         server.accept_session();
         server.accept_session();
-        server.start_match();
 
         // Run until match should end
         for _ in 0..10 {
@@ -591,7 +664,7 @@ mod tests {
     fn test_t0_17_playerid_test_mode() {
         let config = ServerConfig {
             test_mode: true,
-            test_player_ids: Some((17, 99)),
+            test_player_ids: Some(vec![17, 99]),
             match_duration_ticks: 10,
             ..Default::default()
         };
@@ -602,8 +675,6 @@ mod tests {
 
         assert_eq!(player1, 17);
         assert_eq!(player2, 99);
-
-        server.start_match();
 
         // Run a few ticks
         for _ in 0..5 {
@@ -623,7 +694,6 @@ mod tests {
         let mut server = Server::new(ServerConfig::default());
         server.accept_session();
         server.accept_session();
-        server.start_match();
 
         // Step and get serialized snapshot
         let (_, floor1, bytes1) = server.step();
@@ -650,7 +720,6 @@ mod tests {
         let mut server = Server::new(config);
         server.accept_session();
         server.accept_session();
-        server.start_match();
 
         // Step without any inputs - should use LKI (zero)
         let (snapshot1, _, _) = server.step();
@@ -677,7 +746,6 @@ mod tests {
         let mut server = Server::new(config);
         server.accept_session();
         server.accept_session();
-        server.start_match();
 
         // Run the match
         while server.should_end_match().is_none() {
@@ -709,10 +777,10 @@ mod tests {
         let mut server = Server::new(config);
         let (session1, _, _) = server.accept_session();
         server.accept_session();
-        let (_, welcomes) = server.start_match();
+        let welcome1 = server.welcome_for(session1);
 
         // Get initial floor (verified for sanity)
-        let initial_floor = welcomes[0].1.target_tick_floor;
+        let initial_floor = welcome1.target_tick_floor;
         assert_eq!(initial_floor, INPUT_LEAD_TICKS);
 
         // Step a few times to advance the floor
@@ -756,7 +824,8 @@ mod tests {
     /// Server should detect when connection phase exceeds timeout.
     /// Note: In v0, actual timeout is external (e.g., orchestrator checks).
     /// This test verifies the timeout constant exists and server exposes
-    /// connection state for external timeout enforcement.
+    /// connection state for external timeout enforcement (now gating "at
+    /// least 1 session" instead of "exactly 2").
     #[test]
     fn test_t0_16_connection_timeout() {
         // Verify timeout constant is set per v0-parameters
@@ -765,22 +834,16 @@ mod tests {
         // Create server and verify session tracking
         let mut server = Server::new(ServerConfig::default());
         assert_eq!(server.session_count(), 0);
-        assert!(!server.is_ready_to_start());
 
-        // Add one session - not ready
+        // Add one session - the external timeout check
+        // (session_count() >= 1) would now be satisfied.
         server.accept_session();
         assert_eq!(server.session_count(), 1);
-        assert!(!server.is_ready_to_start());
-
-        // Add second session - now ready
-        server.accept_session();
-        assert_eq!(server.session_count(), 2);
-        assert!(server.is_ready_to_start());
 
         // The timeout itself would be enforced externally by checking:
         // - start_time (when server was created)
         // - current_time - start_time > CONNECT_TIMEOUT_MS
-        // - server.is_ready_to_start() == false
+        // - server.session_count() == 0
         // If that condition is true, orchestrator would exit with non-zero.
         // The server exposes enough state for this check.
     }
